@@ -14,3 +14,5 @@ probe/vtcreate
 
 # 运行时
 *.log
+
+*.apk

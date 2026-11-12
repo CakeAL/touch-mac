@@ -55,7 +55,7 @@
 
 实测结果：设备插入后 `NSScreen.touchCapabilities` 从 0 变成 1，Mac 认为这块屏可触控。
 
-## 5. 待做：16 指多点
+## 5. 16 指多点（已实现，待实测）
 
 单指描述符只能验证“被识别为触控屏”。多点需要换成 16 个 finger collection + Contact Count：
 
@@ -78,6 +78,13 @@ end:     05 0D 09 54 15 00 25 10 75 08 95 01 81 02 C0   // Contact Count = 16
 
 Android 侧：`MotionEvent` 的 `pointerId` 映射到槽位 1..16，`ACTION_MOVE` 更新坐标，`ACTION_UP` 发抬起帧，`ACTION_CANCEL` 全部抬起。
 
+实现：`hid_gadget.sh setup-mt`（描述符一次性整体写入 `report_desc`，因为 configfs 每次 store 是替换而非追加）；
+`android/app/` 是采集端，用 `su -c "cat > /dev/hidg0"` 的管道写报告，避开 SELinux 对普通 App 写 hidg 设备的限制。
+
+⚠️ 关键坑：`report_length` 是 f_hid 的独立选项（最小 16），**不会**从描述符自动推导，默认 0；
+而 `f_hidg_write()` 里 `count = min(len, report_length)`，所以不显式设置就一个字节都发不出去。
+单指布局设 64（6 字节报告照样能发），多点布局设 97。
+
 ## 6. 视频链路
 
 - Mac：`SCStream`（ScreenCaptureKit）→ `VTCompressionSession`（HEVC，`EnableLowLatencyRateControl`）→ 长度前缀 NAL → TCP
@@ -97,7 +104,7 @@ Android 侧：`MotionEvent` 的 `pointerId` 映射到槽位 1..16，`ACTION_MOVE
 | 阶段 | 内容 | 验收 |
 | --- | --- | --- |
 | P0 ✅ | 单指 gadget | `touchCaps = 1` |
-| P1 | 16 指描述符 + Android 触摸转发 | TouchLab 日志出现 `[touch]`；双指缩放/滚动；红绿灯放大 |
+| P1 🟡 | 16 指描述符 + Android 触摸转发（代码已就绪） | TouchLab 日志出现 `[touch]`；双指缩放/滚动；红绿灯放大 |
 | P2 | 视频链路 | 1080p60，端到端 < 60ms |
 | P3 | S Pen | 压感/倾斜/悬停/笔键 |
 | P4 | WiFi、码率自适应、音频、剪贴板 | — |
@@ -133,7 +140,9 @@ IOHIDUserDeviceHandleReportWithTimeStamp(dev, mach_absolute_time(), report, len)
 touch-mac/
 ├── README.md
 ├── plan.md
-├── android/hid_gadget.sh
+├── android/
+│   ├── hid_gadget.sh            # gadget：setup / setup-mt / tap / tap2 / rollback
+│   └── app/                     # 安卓 App：MotionEvent → /dev/hidg0
 ├── mac/
 │   ├── touchbridge.m            # 软件虚拟触屏（27.2 不可用）
 │   └── TouchLab/                # 验证 App
