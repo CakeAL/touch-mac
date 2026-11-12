@@ -1,0 +1,16 @@
+.DS_Store
+
+# 编译产物
+build/
+*.app/
+mac/touchbridge
+probe/build/
+probe/screeninfo
+probe/vtouch
+probe/vkeyb
+probe/vnat
+probe/vnat_ent
+probe/vtcreate
+
+# 运行时
+*.log
