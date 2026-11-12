@@ -55,7 +55,12 @@ adb shell su -c 'sh /data/local/tmp/hid_gadget.sh setup'      # 单指，先用 
 adb shell su -c 'sh /data/local/tmp/hid_gadget.sh tap'
 ```
 
-回滚：`adb shell su -c 'sh /data/local/tmp/hid_gadget.sh rollback'`（adb 掉了就重启平板）。
+回滚：`adb shell su -c 'sh /data/local/tmp/hid_gadget.sh rollback'`。
+
+> ⚠️ **失联救援**：绑定 gadget 后，USB 上的 adb（f_fs）会随默认 gadget `g1` 一起被解绑，有线 adb 必然消失。
+> 如果此时又没开无线 adb，唯一的恢复办法是在平板上**重启**（configfs 的 gadget 只存在于运行时，不持久化），
+> 或者在本机的 root 终端（Termux 等）里跑 `rollback`。
+> 所以脚本在绑 UDC 前会检查 `service.adb.tcp.port`，没开无线 adb 会拒绝执行；确实要冒险就加 `--force`。
 
 ### 2b. 多点（16 指）
 

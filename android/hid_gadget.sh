@@ -17,6 +17,29 @@ STATE=/data/local/tmp/touchmac.layout   # single | mt
 TMP=/data/local/tmp/touchmac.report
 DESC=/data/local/tmp/touchmac.desc
 LEN=6
+FORCE=0
+
+# 切到 HID gadget 后，USB 上的 adb（f_fs）会随默认 gadget g1 一起解除绑定，
+# 有线 adb 必然消失。没有无线 adb 就只能重启平板恢复，所以绑 UDC 前先确认。
+has_net_adb() {
+  P=$(getprop service.adb.tcp.port 2>/dev/null)
+  [ -n "$P" ] && [ "$P" != "0" ] && return 0
+  P=$(getprop persist.adb.tcp.port 2>/dev/null)
+  [ -n "$P" ] && [ "$P" != "0" ] && return 0
+  return 1
+}
+
+guard_net_adb() {
+  [ "$FORCE" = "1" ] && return 0
+  has_net_adb && return 0
+  echo "⚠️  没检测到无线 adb（service.adb.tcp.port 未设置）。"
+  echo "   一旦绑定 gadget，USB adb 会消失；到时候只能重启平板才能恢复控制。"
+  echo "   先在 Mac 上执行："
+  echo "     adb tcpip 5555 && adb connect <平板IP>:5555"
+  echo "   确认 adb devices 里有 192.168.x.x:5555 再回来。"
+  echo "   确定要冒险（例如本来就没有可用 adb）：$0 setup-mt --force"
+  exit 2
+}
 
 check() {
   echo "== 内核 f_hid =="
@@ -73,6 +96,29 @@ write_desc_single() {
   # 否则为 0，f_hidg_write 里 count = min(len, report_length) = 0，什么都发不出去。
   echo 64 > $G/functions/hid.usb0/report_length
   LEN=6
+FORCE=0
+
+# 切到 HID gadget 后，USB 上的 adb（f_fs）会随默认 gadget g1 一起解除绑定，
+# 有线 adb 必然消失。没有无线 adb 就只能重启平板恢复，所以绑 UDC 前先确认。
+has_net_adb() {
+  P=$(getprop service.adb.tcp.port 2>/dev/null)
+  [ -n "$P" ] && [ "$P" != "0" ] && return 0
+  P=$(getprop persist.adb.tcp.port 2>/dev/null)
+  [ -n "$P" ] && [ "$P" != "0" ] && return 0
+  return 1
+}
+
+guard_net_adb() {
+  [ "$FORCE" = "1" ] && return 0
+  has_net_adb && return 0
+  echo "⚠️  没检测到无线 adb（service.adb.tcp.port 未设置）。"
+  echo "   一旦绑定 gadget，USB adb 会消失；到时候只能重启平板才能恢复控制。"
+  echo "   先在 Mac 上执行："
+  echo "     adb tcpip 5555 && adb connect <平板IP>:5555"
+  echo "   确认 adb devices 里有 192.168.x.x:5555 再回来。"
+  echo "   确定要冒险（例如本来就没有可用 adb）：$0 setup-mt --force"
+  exit 2
+}
 }
 
 # 16 指：16 个 Finger collection（每个 6 字节）+ ContactCount(1 字节) = 97 字节
@@ -103,6 +149,7 @@ bind_udc() {
 }
 
 setup_single() {
+  guard_net_adb
   create_gadget
   write_desc_single
   echo single > $STATE
@@ -111,6 +158,7 @@ setup_single() {
 }
 
 setup_mt() {
+  guard_net_adb
   create_gadget
   write_desc_mt
   echo mt > $STATE
@@ -183,10 +231,10 @@ rollback() {
 
 case "$1" in
   check) check ;;
-  setup) setup_single ;;
-  setup-mt) setup_mt ;;
+  setup) [ "$2" = "--force" ] && FORCE=1; setup_single ;;
+  setup-mt) [ "$2" = "--force" ] && FORCE=1; setup_mt ;;
   tap) tap ;;
   tap2) tap2 ;;
   rollback) rollback ;;
-  *) echo "用法: $0 check|setup|setup-mt|tap|tap2|rollback" ;;
+  *) echo "用法: $0 check|setup|setup-mt|tap|tap2|rollback [--force]" ;;
 esac
