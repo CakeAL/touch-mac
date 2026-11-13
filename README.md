@@ -93,7 +93,7 @@ bridge-rs/run.sh -d       # 后台常驻（日志 /tmp/touchbridge.log）
 
 **为什么最后选 TCP：** 视频帧必须完整（少一个分片就是花屏/绿屏），TCP 的重传正好省掉这份麻烦；而且 adb 这一段本身已经是可靠传输，实测 3.5 ms 已经很低，换 UDP 收益有限、风险更大。
 
-**另外，之前那 14 ms 的延迟不是 TCP 的锅。** adbd 对「只下行、没有上行流量」的 reverse socket 会攒包，小包要等十几毫秒才发；给视频 socket 每 5 ms 写 1 个字节的心跳后，延迟从 `17.5 ms → 3.5 ms`。这条心跳就写在 `VideoClient` 里。
+**另外，之前那 14 ms 的延迟不是 TCP 的锅。** adbd 对「只下行、没有上行流量」的 reverse socket 会攒包，小包要等十几毫秒才发；给视频 socket 每毫秒级写 1 个字节的心跳后，延迟从 `17.5 ms → 1.5 ms`。这条心跳就写在 `VideoClient` 里，间隔可用 `/data/local/tmp/tb_ka` 调（默认 2 ms）。
 
 ## 参数与设置
 
@@ -143,9 +143,9 @@ apply              → #applied（桥保存设置并重启自己）
 | 段 | 耗时 | 说明 |
 | --- | --- | --- |
 | 桥内排队 | ~0.0 ms | 组帧后立即写 socket |
-| adb reverse | 3.5–4.2 ms | 5 ms 心跳前是 17.5 ms |
+| adb reverse | 1.5–2.5 ms | 心跳 2 ms（`/data/local/tmp/tb_ka` 可调）；5 ms 时 3.5 ms，无心跳时 17.5 ms |
 | 解码 + 合成 | 8.7–9.1 ms | 硬件解码 ~4 ms + 等 vsync 平均 ~4 ms |
-| **合计** | **13 ms 左右** | 状态行显示的数字 |
+| **合计** | **10–12 ms** | 状态行显示的数字 |
 
 编解码对比（同机同链路，各 20 秒）：
 
