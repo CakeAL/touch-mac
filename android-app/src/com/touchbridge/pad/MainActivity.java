@@ -5,13 +5,18 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.os.Bundle;
 import android.util.Log;
 import android.util.SparseArray;
+import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.FrameLayout;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -24,26 +29,34 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * 平板侧触控转发应用。
+ * 平板侧触控 + 视频显示应用。
  *
- * 通过 adb reverse tcp:47777 tcp:47777 把平板 localhost:47777 转发到 Mac 上的 bridge/touchd.py，
- * 用最朴素的文本行协议发送多点触控：
+ * 触控：通过 adb reverse tcp:47777 tcp:47777 把平板 localhost:47777 转发到 Mac 上的
+ * bridge/touchd.py，用最朴素的文本行协议发送多点触控：
  *   d <id> <x> <y>   按下
  *   m <id> <x> <y>   移动
  *   u <id> <x> <y>   抬起
  *   c                取消全部
  * 坐标归一化到 0..1，原点在左上角（Sunshine 直接把它写成 HID digitizer 坐标）。
  *
- * 屏幕中间会画一个和 Mac 显示器同宽高比的活动框（由 touchd 通过 "#aspect <ratio>" 下发），
- * 框外的触摸不转发，框内坐标线性映射到 Mac 全屏，这样手感和真实触摸屏一致。
+ * 视频：Mac 侧把 H.264 推到 localhost:47779（同样由 adb reverse 建立），
+ * {@link VideoClient} 收流后用 MediaCodec 硬解，直接渲染到 SurfaceView。
+ *
+ * 视图结构（FrameLayout）：
+ *   [0] SurfaceView   —— 视频画面，尺寸/位置精确对齐 16:9 活动框
+ *   [1] TouchSurface  —— 透明背景，只画活动框描边、触点圆环、状态文字
+ * 这样视频在下、触控反馈在上，触控逻辑与坐标映射完全不变。
  */
 public class MainActivity extends Activity {
     static final String TAG = "TouchBridge";
     static final String HOST = "127.0.0.1";
     static final int PORT = 47777;
 
-    private TouchSurface surface;
+    private TouchSurface touch;
+    private SurfaceView videoView;
+    private FrameLayout root;
     private Link link;
+    private VideoClient video;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -51,12 +64,73 @@ public class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         link = new Link();
-        surface = new TouchSurface(this, link);
-        link.surface = surface;
-        setContentView(surface);
-        link.start();
+        video = new VideoClient();
+        video.setStateListener(s -> {
+            TouchSurface t = touch;
+            if (t != null) t.postInvalidateOnAnimation();
+        });
 
+        touch = new TouchSurface(this, link, video);
+        link.surface = touch;
+
+        videoView = new SurfaceView(this);
+        videoView.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override
+            public void surfaceCreated(SurfaceHolder holder) {
+                Rect frame = holder.getSurfaceFrame();
+                Log.i(TAG, "video surface created " + frame.width() + "x" + frame.height());
+                video.setSurface(holder.getSurface(), frame.width(), frame.height());
+            }
+
+            @Override
+            public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) {
+                video.onSurfaceSize(w, h);
+            }
+
+            @Override
+            public void surfaceDestroyed(SurfaceHolder holder) {
+                // 必须在 surface 真正失效前把 codec 放掉
+                video.clearSurface();
+            }
+        });
+
+        root = new FrameLayout(this);
+        root.setBackgroundColor(Color.BLACK);
+        FrameLayout.LayoutParams vp = new FrameLayout.LayoutParams(0, 0);
+        vp.gravity = Gravity.TOP | Gravity.LEFT;
+        root.addView(videoView, vp);
+        root.addView(touch, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+
+        // 活动框变化（尺寸或 host 下发的比例）时，把视频 surface 摆到同一个矩形
+        touch.setAreaListener(area -> {
+            RectF r = new RectF(area);
+            touch.post(() -> applyVideoRect(r));
+        });
+
+        setContentView(root);
+        link.start();
+        video.start();
         hideSystemBars();
+    }
+
+    /** 让 SurfaceView 与 TouchSurface 算出的活动框精确重合。 */
+    private void applyVideoRect(RectF r) {
+        int left = Math.round(r.left);
+        int top = Math.round(r.top);
+        int w = Math.max(1, Math.round(r.right) - left);
+        int h = Math.max(1, Math.round(r.bottom) - top);
+        FrameLayout.LayoutParams cur = (FrameLayout.LayoutParams) videoView.getLayoutParams();
+        if (cur != null && cur.width == w && cur.height == h
+                && cur.leftMargin == left && cur.topMargin == top) {
+            return;
+        }
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(w, h);
+        lp.gravity = Gravity.TOP | Gravity.LEFT;
+        lp.leftMargin = left;
+        lp.topMargin = top;
+        videoView.setLayoutParams(lp);
+        Log.i(TAG, "video rect " + left + "," + top + " " + w + "x" + h);
     }
 
     @Override
@@ -78,17 +152,25 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         if (link != null) link.shutdown();
+        if (video != null) video.shutdown();
         super.onDestroy();
     }
 
-    /** 触控面板：绘制活动框与触点反馈，并按活动框映射坐标。 */
+    /** 触控面板：透明背景，只画活动框描边、触点反馈与状态文字，并按活动框映射坐标。 */
     static class TouchSurface extends View {
+        interface AreaListener {
+            void onAreaChanged(RectF area);
+        }
+
         private Link link;
+        private VideoClient video;
+        private AreaListener areaListener;
+
         private final Paint dot = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint hint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint bg = new Paint();
+        private final Paint waiting = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint outside = new Paint();
         private final Paint frame = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final SparseArray<float[]> active = new SparseArray<>();
@@ -98,23 +180,37 @@ public class MainActivity extends Activity {
         private float targetAspect = 16f / 9f;
         private boolean aspectFromHost = false;
 
-        TouchSurface(Context c, Link link) {
+        TouchSurface(Context c, Link link, VideoClient video) {
             super(c);
             this.link = link;
+            this.video = video;
             dot.setColor(Color.parseColor("#4DA3FF"));
             ring.setColor(Color.parseColor("#80FFFFFF"));
             ring.setStyle(Paint.Style.STROKE);
             ring.setStrokeWidth(3f);
             text.setColor(Color.parseColor("#CCFFFFFF"));
             text.setTextSize(34f);
+            text.setShadowLayer(4f, 0f, 1f, 0xCC000000);
             hint.setColor(Color.parseColor("#66FFFFFF"));
             hint.setTextSize(28f);
-            bg.setColor(Color.BLACK);
+            hint.setShadowLayer(4f, 0f, 1f, 0xCC000000);
+            waiting.setColor(Color.parseColor("#99FFFFFF"));
+            waiting.setTextSize(44f);
+            waiting.setShadowLayer(6f, 0f, 2f, 0xCC000000);
             outside.setColor(Color.parseColor("#121212"));
             frame.setStyle(Paint.Style.STROKE);
             frame.setStrokeWidth(3f);
             frame.setColor(Color.parseColor("#55FFFFFF"));
             setKeepScreenOn(true);
+            // 背景保持透明：视频画面由下层 SurfaceView 负责
+            setBackgroundColor(Color.TRANSPARENT);
+        }
+
+        void setAreaListener(AreaListener l) {
+            areaListener = l;
+            if (area.width() > 0f && area.height() > 0f) {
+                l.onAreaChanged(new RectF(area));
+            }
         }
 
         /** touchd 下发的目标宽高比（Mac 显示器）。 */
@@ -137,21 +233,22 @@ public class MainActivity extends Activity {
             int w = Math.max(1, getWidth()), h = Math.max(1, getHeight());
             if (targetAspect <= 0f) {
                 area.set(0, 0, w, h);
-                return;
+            } else {
+                float fw = w, fh = fw / targetAspect;
+                if (fh > h) {
+                    fh = h;
+                    fw = fh * targetAspect;
+                }
+                float left = (w - fw) / 2f, top = (h - fh) / 2f;
+                area.set(left, top, left + fw, top + fh);
             }
-            float fw = w, fh = fw / targetAspect;
-            if (fh > h) {
-                fh = h;
-                fw = fh * targetAspect;
-            }
-            float left = (w - fw) / 2f, top = (h - fh) / 2f;
-            area.set(left, top, left + fw, top + fh);
+            AreaListener l = areaListener;
+            if (l != null) l.onAreaChanged(new RectF(area));
         }
 
         @Override
         protected void onDraw(Canvas canvas) {
             int w = getWidth(), h = getHeight();
-            canvas.drawRect(0, 0, w, h, bg);
             if (area.left > 0.5f || area.top > 0.5f
                     || area.right < w - 0.5f || area.bottom < h - 0.5f) {
                 canvas.drawRect(0, 0, w, area.top, outside);
@@ -160,6 +257,16 @@ public class MainActivity extends Activity {
                 canvas.drawRect(area.right, area.top, w, area.bottom, outside);
             }
             canvas.drawRect(area, frame);
+
+            boolean playing = video != null && video.isPlaying();
+            if (!playing) {
+                // 视频还没来时在框内居中提示
+                String msg = "等待画面…";
+                float tw = waiting.measureText(msg);
+                float cx = area.centerX();
+                float cy = area.centerY();
+                canvas.drawText(msg, cx - tw / 2f, cy, waiting);
+            }
 
             for (int i = 0; i < active.size(); i++) {
                 float[] p = active.valueAt(i);
@@ -171,10 +278,12 @@ public class MainActivity extends Activity {
 
             float tx = area.left + 36f, ty = area.top + 56f;
             canvas.drawText(link.statusText(), tx, ty, text);
+            canvas.drawText(video == null ? "video: off" : video.statusText(), tx, ty + 44f, text);
             canvas.drawText(String.format(Locale.US, "touching: %d   frame: %s",
-                    active.size(), aspectLabel()), tx, ty + 44f, text);
-            canvas.drawText("只有框内区域会转发触摸", tx, ty + 88f, hint);
-            if (active.size() > 0) postInvalidateOnAnimation();
+                    active.size(), aspectLabel()), tx, ty + 88f, text);
+            canvas.drawText("只有框内区域会转发触摸", tx, ty + 132f, hint);
+
+            if (active.size() > 0 || !playing) postInvalidateOnAnimation();
         }
 
         private String aspectLabel() {

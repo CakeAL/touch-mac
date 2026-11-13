@@ -1,0 +1,548 @@
+package com.touchbridge.pad;
+
+import android.media.MediaCodec;
+import android.media.MediaFormat;
+import android.os.Build;
+import android.os.SystemClock;
+import android.util.Log;
+import android.view.Surface;
+
+import java.io.BufferedInputStream;
+import java.io.DataInputStream;
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * Mac → 平板 的 H.264 视频接收 + MediaCodec 硬解，直接渲染到 SurfaceView 的 Surface。
+ *
+ * 传输（TCP 127.0.0.1:47779，adb reverse 由 Mac 侧建立）：
+ *   u8 type | u32 BE length | payload
+ *   type=0x01 CONFIG：payload 是带 00 00 00 01 起始码的 Annex-B（SPS/PPS），整段作为 csd-0
+ *   type=0x02 FRAME ：payload = u64 BE pts_us | u8 flags | Annex-B access unit
+ *                     flags bit0=1 表示关键帧（IDR）
+ *
+ * 两条后台线程：
+ *   video-net  连接 / 断线后 400ms 重连 / 拆包，并把 access unit 放进有界队列
+ *              （队列满了丢弃积压并要求解码器在下一个 IDR 重新同步，避免延迟无限增长）
+ *   video-dec  MediaCodec 的生命周期与送帧；Surface 失效时立刻 stop/release，
+ *              CONFIG 变化时先 stop/release 再按新 csd 重建
+ * 两条线程都不碰 UI；状态变化通过 StateListener 通知出去。
+ */
+public final class VideoClient {
+    static final String TAG = "TouchBridge";
+    static final String HOST = "127.0.0.1";
+    static final int PORT = 47779;
+
+    private static final int TYPE_CONFIG = 0x01;
+    private static final int TYPE_FRAME = 0x02;
+
+    /** 单条消息上限，防止坏长度把内存吃穿。 */
+    private static final int MAX_MESSAGE = 16 * 1024 * 1024;
+    /** 待解码帧数上限：一帧 100KB 级，12 帧 ≈ 1.2MB，够吸收抖动又不会积压成延迟。 */
+    private static final int FRAME_QUEUE = 12;
+    private static final int RECONNECT_MS = 400;
+
+    interface StateListener {
+        void onState(String text);
+    }
+
+    private final Object codecLock = new Object();
+    private final ArrayBlockingQueue<Frame> frames = new ArrayBlockingQueue<>(FRAME_QUEUE);
+
+    private volatile boolean running = true;
+    /** 请求解码器丢弃到下一个 IDR 再继续送帧（配置变化 / 队列溢出）。 */
+    private volatile boolean wantResync = true;
+
+    // ---- 以下字段由 codecLock 保护 ----
+    private Surface surface;
+    private int surfaceW;
+    private int surfaceH;
+    private byte[] csd;
+    private long csdGen;
+    private MediaCodec codec;
+    private byte[] appliedCsd;
+    private long appliedGen = -1;
+    private Surface appliedSurface;
+    private boolean needKey = true;
+    private boolean gotFrame;
+
+    private volatile String netState = "connecting…";
+    private volatile String decState = "idle";
+    private volatile long lastFrameAt;
+    private volatile int videoW;
+    private volatile int videoH;
+    private volatile StateListener listener;
+
+    private volatile Socket socket;
+    private Thread netThread;
+    private Thread decThread;
+
+    void setStateListener(StateListener l) {
+        listener = l;
+    }
+
+    String statusText() {
+        String d = decState;
+        String n = netState;
+        return "video: " + n + ("idle".equals(d) ? "" : " · " + d);
+    }
+
+    /** 最近 1.5s 内有帧被渲染出去。 */
+    boolean isPlaying() {
+        long t = lastFrameAt;
+        return t != 0 && SystemClock.elapsedRealtime() - t < 1500;
+    }
+
+    // ---------------------------------------------------------------- 生命周期
+
+    void start() {
+        netThread = new Thread(this::netLoop, "video-net");
+        netThread.setDaemon(true);
+        netThread.start();
+        decThread = new Thread(this::decLoop, "video-dec");
+        decThread.setDaemon(true);
+        decThread.start();
+    }
+
+    void shutdown() {
+        running = false;
+        closeQuietly();
+        if (netThread != null) netThread.interrupt();
+        if (decThread != null) decThread.interrupt();
+        synchronized (codecLock) {
+            releaseCodecLocked();
+        }
+        setNetState("stopped");
+    }
+
+    // ---------------------------------------------------------------- Surface
+
+    /** SurfaceView 的 Surface 建好了（主线程回调）。 */
+    void setSurface(Surface s, int w, int h) {
+        synchronized (codecLock) {
+            surface = s;
+            surfaceW = w;
+            surfaceH = h;
+        }
+        Log.i(TAG, "video surface ready " + w + "x" + h);
+    }
+
+    /** 活动框比例变化导致 SurfaceView 尺寸变化（surface 本身没销毁）。 */
+    void onSurfaceSize(int w, int h) {
+        synchronized (codecLock) {
+            surfaceW = w;
+            surfaceH = h;
+        }
+        Log.i(TAG, "video surface resized " + w + "x" + h);
+    }
+
+    /** Surface 即将销毁：必须在 surface 失效前把 codec 放掉。 */
+    void clearSurface() {
+        synchronized (codecLock) {
+            surface = null;
+            releaseCodecLocked();
+        }
+        Log.i(TAG, "video surface destroyed, codec released");
+        setDecState("waiting for surface");
+    }
+
+    // ---------------------------------------------------------------- 网络线程
+
+    private void netLoop() {
+        while (running) {
+            boolean connected = false;
+            try {
+                Socket s = new Socket();
+                s.setTcpNoDelay(true);
+                s.setKeepAlive(true);
+                s.setReceiveBufferSize(1 << 20);
+                s.connect(new InetSocketAddress(HOST, PORT), 1500);
+                socket = s;
+                connected = true;
+                Log.i(TAG, "video connected to " + HOST + ":" + PORT);
+                setNetState("connected");
+                DataInputStream in = new DataInputStream(
+                        new BufferedInputStream(s.getInputStream(), 64 * 1024));
+                readLoop(in);
+            } catch (Exception e) {
+                if (!running) break;
+                // 已连上后断开由下面的 "stream closed" 分支统一报告，避免重复日志
+                if (!connected) {
+                    Log.w(TAG, "video link failure: " + e + " — retry in " + RECONNECT_MS + "ms");
+                    setNetState("no stream, retry " + RECONNECT_MS + "ms");
+                }
+            } finally {
+                closeQuietly();
+            }
+            if (!running) break;
+            if (connected) {
+                Log.w(TAG, "video stream closed — retry in " + RECONNECT_MS + "ms");
+                setNetState("stream closed, retry " + RECONNECT_MS + "ms");
+            }
+            try {
+                Thread.sleep(RECONNECT_MS);
+            } catch (InterruptedException ie) {
+                break;
+            }
+        }
+        setNetState("stopped");
+    }
+
+    /** 按协议逐条读消息；大消息用 readFully 整块读。 */
+    private void readLoop(DataInputStream in) throws IOException {
+        while (running) {
+            int type = in.readUnsignedByte();
+            long len = ((long) in.readUnsignedByte() << 24)
+                    | ((long) in.readUnsignedByte() << 16)
+                    | ((long) in.readUnsignedByte() << 8)
+                    | in.readUnsignedByte();
+            if (len < 0 || len > MAX_MESSAGE) {
+                throw new IOException("bad message length " + len + " (type=" + type + ")");
+            }
+            byte[] payload = new byte[(int) len];
+            in.readFully(payload);
+            if (type == TYPE_CONFIG) {
+                onConfig(payload);
+            } else if (type == TYPE_FRAME) {
+                onFramePayload(payload);
+            } else {
+                Log.w(TAG, "video: unknown message type " + type + " len=" + len);
+            }
+        }
+    }
+
+    private void onConfig(byte[] payload) {
+        int[] wh = H264Sps.parse(payload);
+        synchronized (codecLock) {
+            csd = payload;
+            csdGen++;
+            if (wh != null) {
+                videoW = wh[0];
+                videoH = wh[1];
+            }
+        }
+        frames.clear();
+        wantResync = true;
+        Log.i(TAG, "video CONFIG " + payload.length + " bytes"
+                + (wh != null ? ", sps " + wh[0] + "x" + wh[1] : ", sps parse failed"));
+        setDecState("config " + (wh != null ? wh[0] + "x" + wh[1] : payload.length + "B"));
+    }
+
+    private void onFramePayload(byte[] payload) {
+        if (payload.length < 9) {
+            Log.w(TAG, "video: short FRAME message " + payload.length);
+            return;
+        }
+        long pts = 0;
+        for (int i = 0; i < 8; i++) {
+            pts = (pts << 8) | (payload[i] & 0xffL);
+        }
+        int flags = payload[8] & 0xff;
+        boolean key = (flags & 0x01) != 0;
+
+        byte[] au = new byte[payload.length - 9];
+        System.arraycopy(payload, 9, au, 0, au.length);
+
+        if (surface == null || csd == null) {
+            // surface 还没就绪（例如退到后台）：直接丢帧，别把队列灌满
+            return;
+        }
+        if (!frames.offer(new Frame(au, pts, key))) {
+            // 解码跟不上：丢掉积压，等下一个 IDR 重新同步
+            frames.clear();
+            wantResync = true;
+            frames.offer(new Frame(au, pts, key));
+            Log.w(TAG, "video queue overflow, dropped backlog, resync at next IDR");
+        }
+    }
+
+    // ---------------------------------------------------------------- 解码线程
+
+    private void decLoop() {
+        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+        while (running) {
+            boolean ready;
+            synchronized (codecLock) {
+                ready = ensureCodecLocked();
+            }
+            if (!ready) {
+                sleepQuietly(80);
+                continue;
+            }
+            Frame f;
+            try {
+                f = frames.poll(8, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException ie) {
+                break;
+            }
+            synchronized (codecLock) {
+                MediaCodec c = codec;
+                if (c == null) continue;
+                if (wantResync) {
+                    wantResync = false;
+                    needKey = true;
+                }
+                if (f != null && (!needKey || f.key)) {
+                    if (feedLocked(c, f)) {
+                        needKey = false;
+                    }
+                }
+                drainLocked(c, info);
+            }
+        }
+        synchronized (codecLock) {
+            releaseCodecLocked();
+        }
+        Log.i(TAG, "video decoder stopped");
+    }
+
+    /** 按当前 surface + csd 准备 codec；配置变了就先 stop/release 再重建。 */
+    private boolean ensureCodecLocked() {
+        Surface surf = surface;
+        byte[] csdLocal = csd;
+        long gen = csdGen;
+        if (codec != null && surf == appliedSurface && csdLocal == appliedCsd && gen == appliedGen) {
+            return true;
+        }
+        releaseCodecLocked();
+        if (surf == null || csdLocal == null) {
+            if (surf == null) setDecState("waiting for surface");
+            else setDecState("waiting csd");
+            return false;
+        }
+
+        int w = videoW;
+        int h = videoH;
+        if (w <= 0 || h <= 0) {
+            w = surfaceW;
+            h = surfaceH;
+        }
+        if (w <= 0 || h <= 0) {
+            w = 1920;
+            h = 1080;
+        }
+
+        MediaCodec c = null;
+        try {
+            c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
+            MediaFormat fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h);
+            fmt.setByteBuffer("csd-0", ByteBuffer.wrap(csdLocal));
+            if (Build.VERSION.SDK_INT >= 30) {
+                try {
+                    fmt.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
+                } catch (Exception ignore) {
+                    Log.i(TAG, "video: decoder refused low-latency flag");
+                }
+            }
+            c.configure(fmt, surf, null, 0);
+            c.start();
+        } catch (Exception e) {
+            Log.w(TAG, "video codec start failed: " + e);
+            if (c != null) {
+                try {
+                    c.release();
+                } catch (Exception ignore) {
+                }
+            }
+            setDecState("codec error");
+            return false;
+        }
+
+        codec = c;
+        appliedCsd = csdLocal;
+        appliedGen = gen;
+        appliedSurface = surf;
+        needKey = true;
+        gotFrame = false;
+        wantResync = false;
+        frames.clear();          // 新 codec 只能从 IDR 开始喂
+        Log.i(TAG, "video codec started " + c.getName() + " " + w + "x" + h
+                + " low-latency=" + (Build.VERSION.SDK_INT >= 30 ? 1 : 0));
+        setDecState("decoding " + w + "x" + h);
+        return true;
+    }
+
+    private void releaseCodecLocked() {
+        MediaCodec c = codec;
+        codec = null;
+        appliedCsd = null;
+        appliedGen = -1;
+        appliedSurface = null;
+        needKey = true;
+        gotFrame = false;
+        if (c != null) {
+            try {
+                c.stop();
+            } catch (Exception ignore) {
+            }
+            try {
+                c.release();
+            } catch (Exception ignore) {
+            }
+            Log.i(TAG, "video codec released");
+        }
+    }
+
+    /** 送一个 access unit。返回 true 表示成功进了解码器。 */
+    private boolean feedLocked(MediaCodec c, Frame f) {
+        long deadline = SystemClock.elapsedRealtime() + 60;
+        while (true) {
+            int in;
+            try {
+                in = c.dequeueInputBuffer(5000);
+            } catch (IllegalStateException ise) {
+                Log.w(TAG, "video dequeueInputBuffer failed: " + ise);
+                return false;
+            }
+            if (in >= 0) {
+                ByteBuffer buf = c.getInputBuffer(in);
+                if (buf == null) {
+                    needKey = true;
+                    return false;
+                }
+                buf.clear();
+                if (f.data.length > buf.capacity()) {
+                    Log.w(TAG, "video AU too big: " + f.data.length + " > " + buf.capacity());
+                    needKey = true;
+                    return false;
+                }
+                buf.put(f.data);
+                try {
+                    c.queueInputBuffer(in, 0, f.data.length, f.ptsUs, 0);
+                } catch (IllegalStateException ise) {
+                    Log.w(TAG, "video queueInputBuffer failed: " + ise);
+                    needKey = true;
+                    return false;
+                }
+                return true;
+            }
+            if (SystemClock.elapsedRealtime() > deadline) {
+                // 解码器一直不给输入 buffer：丢掉这帧，等下一个 IDR 重新同步
+                needKey = true;
+                Log.w(TAG, "video: no input buffer for 60ms, resync at next IDR");
+                return false;
+            }
+        }
+    }
+
+    /** 取出所有已解码的输出并渲染到 surface。 */
+    private void drainLocked(MediaCodec c, MediaCodec.BufferInfo info) {
+        while (true) {
+            int out;
+            try {
+                out = c.dequeueOutputBuffer(info, 0);
+            } catch (IllegalStateException ise) {
+                return;
+            }
+            if (out == MediaCodec.INFO_TRY_AGAIN_LATER) {
+                return;
+            }
+            if (out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                MediaFormat of = c.getOutputFormat();
+                if (of.containsKey("width") && of.containsKey("height")) {
+                    videoW = of.getInteger("width");
+                    videoH = of.getInteger("height");
+                    // crop-* 才是真正可见尺寸（1080 编出来是 1088，需要裁掉 8 行）
+                    if (of.containsKey("crop-right") && of.containsKey("crop-left")
+                            && of.containsKey("crop-bottom") && of.containsKey("crop-top")) {
+                        int cw = of.getInteger("crop-right") - of.getInteger("crop-left") + 1;
+                        int ch = of.getInteger("crop-bottom") - of.getInteger("crop-top") + 1;
+                        if (cw > 0 && ch > 0) {
+                            videoW = cw;
+                            videoH = ch;
+                        }
+                    }
+                }
+                Log.i(TAG, "video output format: " + of);
+                continue;
+            }
+            if (out == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) {
+                continue;
+            }
+            if (out < 0) {
+                return;
+            }
+            boolean config = (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
+            boolean eos = (info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
+            boolean render = !config && !eos;
+            try {
+                c.releaseOutputBuffer(out, render);
+            } catch (Exception ignore) {
+            }
+            if (render) {
+                lastFrameAt = SystemClock.elapsedRealtime();
+                if (!gotFrame) {
+                    gotFrame = true;
+                    Log.i(TAG, "video first frame rendered (" + videoW + "x" + videoH + ")");
+                    setDecState("playing " + videoW + "x" + videoH);
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- 工具
+
+    /** 链路状态（网络线程维护），只在变化时打日志。 */
+    private void setNetState(String s) {
+        if (s.equals(netState)) {
+            return;
+        }
+        netState = s;
+        Log.i(TAG, "video net: " + s);
+        notifyState();
+    }
+
+    /** 解码状态（解码线程维护），只在变化时打日志。 */
+    private void setDecState(String s) {
+        if (s.equals(decState)) {
+            return;
+        }
+        decState = s;
+        Log.i(TAG, "video dec: " + s);
+        notifyState();
+    }
+
+    private void notifyState() {
+        StateListener l = listener;
+        if (l != null) {
+            try {
+                l.onState(statusText());
+            } catch (Exception ignore) {
+            }
+        }
+    }
+
+    private void closeQuietly() {
+        Socket s = socket;
+        socket = null;
+        if (s != null) {
+            try {
+                s.close();
+            } catch (Exception ignore) {
+            }
+        }
+    }
+
+    private static void sleepQuietly(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException ignore) {
+        }
+    }
+
+    private static final class Frame {
+        final byte[] data;
+        final long ptsUs;
+        final boolean key;
+
+        Frame(byte[] data, long ptsUs, boolean key) {
+            this.data = data;
+            this.ptsUs = ptsUs;
+            this.key = key;
+        }
+    }
+}

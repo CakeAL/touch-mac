@@ -200,3 +200,50 @@ WindowServer: BKDirectTouchState → contacts → 应用指针事件
   只在 `NSEventTypeGesture`(subtype 63) 里拿到 0 个 touch，应用层只有单指针。
   用户表示此前用“Moonlight 多点触控版”在平板上验证过多点触控，二者矛盾，
   需按当时的客户端版本/App 复测后才能定论。
+
+## 9. Rust 版桥（`bridge-rs`，已完成，取代 `bridge/client`）
+
+`bridge/client` 用 moonlight-common-c 只能“发触控 + 丢帧”，要做到“平板看画面 + 触控”，
+必须拿到原始 H.264 帧并按需请求关键帧。Rust 版直接实现协议本身，单二进制无外部依赖。
+
+### 9.1 链路与端口
+
+```
+平板 App ─touch(47777)─┐
+        └─video(47779)─┤ adb reverse
+                       ▼
+bridge-rs ─RTSP/ENet/GCM─► Sunshine ─► libvirtualhid ─► VoidLink ─► WindowServer
+```
+
+Sunshine 的二进制与签名均未改动（`codesign --verify --deep --strict` 通过），
+只读它的 `/launch`、RTSP 与控制流。
+
+### 9.2 实现要点（协议细节见 `bridge-rs/README.md`）
+
+- `launch.rs` HTTPS `/launch`（mTLS，X.509 v3 客户端证书）→ `rtsp://` 会话 URL（`corever=0` 走明文 RTSP）。
+- `rtsp.rs` 七条请求：OPTIONS → DESCRIBE → SETUP audio/video/control → ANNOUNCE → PLAY。
+  ANNOUNCE 的 SDP 必须带全 `x-nv-*`/`x-ss-*` 属性，且**每条属性行尾多一个空格**，否则 400。
+- `control.rs` ENet（vendor enet 2.x + C shim）+ AES-128-GCM 信封
+  （`u16 0x0001 | u16 len | u32 seq | 16B tag | ct`，IV=`seq LE4|0*6|'C'|'C'`）。
+- `video.rs` 收 Sunshine 私有切片：`12B RTP | 4B 保留 | 16B NV 头 | payload`；
+  按 `SOF/EOF` 组帧、丢 `fecIdx >= dataShards` 的 RS 校验片、剥 8B（`0x01`）或 44B（`0x81`）帧头、
+  提取 SPS/PPS 作为 CONFIG。
+- `relay.rs` 给平板的中转格式：`u8 type | u32 BE len | payload`，
+  CONFIG=Annex-B 参数集，FRAME=`u64 BE pts | u8 flags | AU`。
+
+### 9.3 实测（VERIFIED，2026-11-13 19:37–19:44）
+
+- 触控：平板点按 → `[100070FCF] contact 1 presence: touching / none`，
+  `BKDirectTouchState ... displayUUID: 8BF51424-...` 正常。
+- 视频：平板冷启动首帧 **≈620 ms**（`video CONFIG 33 bytes` → `codec started` →
+  `first frame rendered (1920x1080)`），截图可见 Mac 桌面实时画面。
+- 会话中每 5 s 请求一次 IDR 兜底；新客户端连入立即请求 IDR。
+
+### 9.4 三个必须知道的坑
+
+1. **证书版本**：LibreSSL 默认签 X.509 v1，rustls 报 `UnsupportedCertVersion`；
+   用 `-extfile` 加 basicConstraints/keyUsage/EKU 重签成 v3。
+2. **build.rs 的 `rerun-if-changed`**：改了 C shim 签名但只重编 Rust，
+   会变成“6 参调 5 参函数”，`tb_connect` 写坏指针直接 SIGSEGV。
+3. **CONFIG 去重**：每个 IDR 都带 SPS/PPS，若每次都下发 CONFIG，
+   平板端解码器每 5 秒重建一次，画面永远停在「等待画面…」。

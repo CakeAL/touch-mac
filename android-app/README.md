@@ -25,25 +25,54 @@ adb install -r android-app/build/touchbridge.apk
 adb shell am start -n com.touchbridge.pad/.MainActivity
 ```
 
-App 会占满屏幕、黑底，中间画一个和 Mac 显示器同宽高比的活动框（默认 16:9），
-左上角显示链路状态：
+App 会占满屏幕、黑底，中间是视频区 + 和 Mac 显示器同宽高比的活动框（默认 16:9），
+左上角显示状态：
 
 ```
 adb reverse tcp:47777 · connected
+video: connected · playing 1920x1080
 touching: 0   frame: 1.778 (host)
-长按切换比例 · 只有框内区域会转发触摸
+只有框内区域会转发触摸
 ```
 
-`no link` 表示 Mac 侧还没起 `bridge/session.sh --net`。
+`no link` 表示 Mac 侧还没起 `bridge/session.sh --net`；`video:` 行显示视频链路与解码
+状态（`no stream, retry 400ms` 表示 Mac 侧还没推流，框内会显示“等待画面…”）。
 
 只有框内的触摸会被转发，框内坐标线性映射到 Mac 全屏，所以平板上看到的就是
 Mac 屏幕的等比缩放，不会因为两机比例不同而拉歪。比例由 Mac 侧下发（见下），
 想换比例改 `session.sh --aspect` 即可。
 
+## 视频层（H.264 硬解）
+
+视频和触控是两条独立链路：触控走 47777 的文本行，视频走 47779 的二进制流，
+互不阻塞（视频断线不影响触控，反之亦然）。
+
+- 显示：`FrameLayout` 里底层是 `SurfaceView`，位置和大小按 `TouchSurface` 算出的活动框
+  每帧对齐；上层 `TouchSurface` 改成透明背景，只画活动框描边、触点圆环和状态文字。
+  触摸逻辑与坐标映射完全没动。
+- 解码：`VideoClient` 里两个线程 —— `video-net` 收流，`video-dec` 用
+  `MediaCodec.createDecoderByType("video/avc")` 送帧（`KEY_LOW_LATENCY=1`，API 30+），
+  输出 `releaseOutputBuffer(index, true)` 直接渲染到 SurfaceView。帧队列满时丢掉积压并
+  等下一个 IDR 重新同步；surface 销毁（退到后台）时先释放 codec，回来再重建。
+- 分辨率变化（Mac 侧改窗口/改采集参数）会收到新的 CONFIG，codec 自动 stop/release 重建。
+- 断线每 400 ms 重连，连接和重连都在后台线程，不阻塞 UI。
+
+```bash
+adb reverse tcp:47779 tcp:47779     # Mac 侧脚本建立
+```
+
+协议（每条消息 `u8 type` + `u32 BE length` + payload）：
+
+```
+0x01 CONFIG  Annex-B 字节流，含 SPS/PPS（00 00 00 01 起始码），整段作为 csd-0
+0x02 FRAME   u64 BE pts_us + u8 flags(bit0=1 关键帧) + Annex-B access unit
+```
+
 ## Mac 侧
 
 ```bash
 adb reverse tcp:47777 tcp:47777     # session.sh --net 会自动执行
+adb reverse tcp:47779 tcp:47779     # 视频端口
 bridge/session.sh --net
 ```
 

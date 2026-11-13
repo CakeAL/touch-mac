@@ -922,6 +922,18 @@ LCC 侧 10 s 无视频包即 `ML_ERROR_NO_VIDEO_TRAFFIC`。可以不解码（fak
   `#aspect 1.777778` → App 画居中活动框，框外触摸丢弃、框内线性映射到 Mac 全屏；
   比例可用 `session.sh --aspect 16:10` 覆盖。实测框外 `tap 1400 30` 无任何指针事件。
 
+### 14.8 Rust 版桥（`bridge-rs`，已取代 `bridge/client`）
+
+- 目的：平板要“看画面 + 触控”，而 LCC 版只能发触控、丢视频帧。
+- 结构：`launch.rs`（HTTPS /launch，mTLS v3 证书）/ `rtsp.rs`（7 条请求 + SDP）/
+  `control.rs`（ENet + AES-128-GCM）/ `video.rs`（Sunshine 私有切片组帧）/ `relay.rs`（视频中转）/
+  `touch.rs`（触控 TCP + `#aspect` 握手）。端口 47777/47779，均走 `adb reverse`。
+- 实测：触控 `contact 1 presence: touching`；视频冷启动首帧 ≈620 ms，1920×1080@60。
+- 关键坑：①证书必须 X.509 v3（rustls 拒绝 v1）；②`build.rs` 需 `rerun-if-changed` 到 C 文件，
+  否则 6 参调 5 参函数 SIGSEGV；③视频流里混着 RS 校验片，必须按 `fecIdx >= dataShards` 过滤；
+  ④CONFIG 只在变化时下发，否则解码器每 5 s 重建；⑤新客户端连入要主动请求 IDR。
+- 细节见 `bridge-rs/README.md` 与 `analysis/native-touch-bridge.md` §9。
+
 ### 14.6 下一步（需要决策）
 
 1. **A（当前可用）**：Mac 端桥接 + `adb` 转发触控。平板不显示 Mac 画面，只当触控面；改动最小。

@@ -43,3 +43,6 @@ bridge/touchwatch
 # 平板 App 构建产物
 android-app/build/
 android-app/debug.keystore
+
+# Rust bridge
+bridge-rs/target/
