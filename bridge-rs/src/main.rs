@@ -146,6 +146,7 @@ type CtlSlot = Arc<std::sync::Mutex<Option<control::ControlHandle>>>;
 fn request_idr(slot: &CtlSlot) {
     if let Some(c) = slot.lock().unwrap().as_ref() {
         c.send(Cmd::RequestIdr);
+        eprintln!("[ctl] 请求 IDR");
     }
 }
 
@@ -401,6 +402,11 @@ async fn main() -> Result<()> {
             _ = idr_rx.changed() => {
                 // 平板端明确要求关键帧（例如解码器丢了参考帧）
                 request_idr(&slot);
+                // 单次请求可能落在会话刚建立/编码器还没就绪时，补几次。
+                for _ in 0..4 {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    request_idr(&slot);
+                }
             }
             _ = tokio::signal::ctrl_c() => break,
             _ = tokio::time::sleep(Duration::from_millis(300)) => {}

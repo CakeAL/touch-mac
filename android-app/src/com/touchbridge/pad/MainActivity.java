@@ -217,6 +217,7 @@ public class MainActivity extends Activity {
         touch.setShowTouches(prefs.getBoolean("showTouches", false));
         touch.setFillScreen(prefs.getBoolean("fillScreen", true));
         video.setMuted(prefs.getBoolean("muteAudio", false));
+        video.setIdrRequester(link::requestIdr);
         link.setPrefRes(prefs.getInt("res", 1080));
 
         setContentView(root);
