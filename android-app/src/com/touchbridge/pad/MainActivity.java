@@ -140,6 +140,8 @@ public class MainActivity extends Activity {
         link = new Link(screenSize());
         video = new VideoClient();
         video.setBridgeClock(() -> link.bridgeNowUs());
+        video.setLowLatency(getSharedPreferences("touchbridge", MODE_PRIVATE)
+                .getBoolean("lowLatency", false));
         video.setStateListener(s -> {
             TouchSurface t = touch;
             if (t != null) t.postInvalidateOnAnimation();

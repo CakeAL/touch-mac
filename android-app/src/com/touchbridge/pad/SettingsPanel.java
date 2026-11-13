@@ -58,7 +58,7 @@ final class SettingsPanel {
 
     private LinearLayout panel;
     private Spinner resSpin, fpsSpin, brSpin;
-    private CheckBox hevcBox, hdrBox, audioBox, delayBox, hudBox, fillBox, touchBox;
+    private CheckBox hevcBox, hdrBox, audioBox, delayBox, hudBox, fillBox, touchBox, lowLatBox;
     private TextView status;
 
     private int curRes = 1080, curFps = 60, curBr = 40000;
@@ -110,6 +110,7 @@ final class SettingsPanel {
         delayBox = addCheck("  其中显示延时数字", prefs.getBoolean("showDelay", true));
         fillBox = addCheck("画面铺满平板（轻微拉伸）", prefs.getBoolean("fillScreen", true));
         touchBox = addCheck("显示触点圆圈", prefs.getBoolean("showTouches", false));
+        lowLatBox = addCheck("低延迟解码（画面撕裂时关掉）", prefs.getBoolean("lowLatency", false));
 
         LinearLayout buttons = new LinearLayout(act);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
@@ -198,6 +199,7 @@ final class SettingsPanel {
         delayBox.setChecked(prefs.getBoolean("showDelay", true));
         fillBox.setChecked(prefs.getBoolean("fillScreen", true));
         touchBox.setChecked(prefs.getBoolean("showTouches", false));
+        lowLatBox.setChecked(prefs.getBoolean("lowLatency", false));
         audioBox.setChecked(!prefs.getBoolean("muteAudio", false));
         status.setText("读取桥参数…");
         new Thread(this::fetchCfg, "settings-fetch").start();
@@ -273,6 +275,7 @@ final class SettingsPanel {
         boolean showDelay = delayBox.isChecked();
         boolean fill = fillBox.isChecked();
         boolean showTouches = touchBox.isChecked();
+        boolean lowLatency = lowLatBox.isChecked();
         boolean mute = !audioBox.isChecked();
         prefs.edit().putBoolean("showHud", showHud).putBoolean("showDelay", showDelay)
                 .putBoolean("fillScreen", fill).putBoolean("showTouches", showTouches)
@@ -281,6 +284,7 @@ final class SettingsPanel {
         surface.setShowDelay(showDelay);
         surface.setFillScreen(fill);
         surface.setShowTouches(showTouches);
+        video.setLowLatency(lowLatency);
         video.setMuted(mute);
 
         String res = (String) resSpin.getSelectedItem();

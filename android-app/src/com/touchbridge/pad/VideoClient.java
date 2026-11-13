@@ -45,6 +45,15 @@ public final class VideoClient {
     private static final int MAX_MESSAGE = 16 * 1024 * 1024;
     /** 待解码帧数上限：一帧 100KB 级，12 帧 ≈ 1.2MB，够吸收抖动又不会积压成延迟。 */
     private static final int FRAME_QUEUE = 6;
+
+    /** 低延迟解码（Qualcomm 上可能引起画面撕裂）。可通过设置面板关闭。 */
+    private volatile boolean lowLatency = false;
+
+    /** 给 Surface 的帧率提示，等于实际码流帧率（不是面板刷新率）。 */
+    private volatile float frameRateHint = 60f;
+    private float measuredFps = 0f;
+    private long fpsWindowStart = 0;
+    private int fpsWindowFrames = 0;
     /** 上行心跳间隔：adbd 会攒包，间隔越小单向延时越低（实测 5ms→3.5ms，2ms→1.5ms，1ms→0.8ms）。 */
     static volatile int KEEPALIVE_MS = readKeepalive();
 
@@ -172,6 +181,43 @@ public final class VideoClient {
     // ---------------------------------------------------------------- Surface
 
     /** SurfaceView 的 Surface 建好了（主线程回调）。 */
+    /** 低延迟解码开关（改完需要重建解码器，由调用方负责）。 */
+    void setLowLatency(boolean on) {
+        lowLatency = on;
+    }
+
+    /** 按实测码流帧率给 Surface 帧率提示，避免 60fps 内容配 120Hz 提示造成节奏错乱。 */
+    private void noteFrameForFps() {
+        long now = SystemClock.elapsedRealtime();
+        if (fpsWindowStart == 0) {
+            fpsWindowStart = now;
+            fpsWindowFrames = 0;
+            return;
+        }
+        fpsWindowFrames++;
+        long dt = now - fpsWindowStart;
+        if (dt >= 1000) {
+            float fps = fpsWindowFrames * 1000f / dt;
+            fpsWindowStart = now;
+            fpsWindowFrames = 0;
+            if (fps > 5 && Math.abs(fps - measuredFps) > 3f) {
+                measuredFps = fps;
+                float hint = Math.round(fps / 10f) * 10f;
+                if (Math.abs(hint - frameRateHint) >= 1f) {
+                    frameRateHint = hint;
+                    Surface s = surface;
+                    if (s != null && Build.VERSION.SDK_INT >= 30) {
+                        try {
+                            s.setFrameRate(hint, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+                            Log.i(TAG, "video frame rate hint -> " + hint);
+                        } catch (Exception ignore) {
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     void setSurface(Surface s, int w, int h) {
         synchronized (codecLock) {
             surface = s;
@@ -182,7 +228,7 @@ public final class VideoClient {
         // 白白多等一个 16.7 ms 的 vsync。
         try {
             if (Build.VERSION.SDK_INT >= 30 && s != null) {
-                s.setFrameRate(120f, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+                s.setFrameRate(frameRateHint, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
             }
         } catch (Exception e) {
             Log.w(TAG, "setFrameRate failed: " + e);
@@ -514,7 +560,7 @@ public final class VideoClient {
             c = MediaCodec.createDecoderByType(mime);
             MediaFormat fmt = MediaFormat.createVideoFormat(mime, w, h);
             fmt.setByteBuffer("csd-0", ByteBuffer.wrap(csdLocal));
-            if (Build.VERSION.SDK_INT >= 30) {
+            if (Build.VERSION.SDK_INT >= 30 && lowLatency) {
                 try {
                     fmt.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
                 } catch (Exception ignore) {
@@ -669,6 +715,7 @@ public final class VideoClient {
             boolean eos = (info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
             boolean render = !config && !eos;
             try {
+                noteFrameForFps();
                 c.releaseOutputBuffer(out, render);
             } catch (Exception ignore) {
             }
