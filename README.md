@@ -1,102 +1,218 @@
-# touch-mac
+# touch-mac —— 把安卓平板变成 Mac 的原生触控屏
 
-把安卓平板变成 Mac 的触控屏（macOS 27.2+），让系统把那块屏当成真正的触控显示器——红绿灯放大、菜单加高、App 收到原生 direct touch。
-
-## 当前状态（2026-11-12）
-
-| 项 | 结果 |
-| --- | --- |
-| 安卓（root）经 USB HID gadget 接入 | ✅ Mac 端 `touchCaps = 1`，已被识别为触控屏 |
-| 单指点击（`setup` + `tap`） | 🟡 已具备，待 Mac 端实测 |
-| 多点（`setup-mt` + 安卓 App） | 🟡 代码完成，待实测 |
-| 软件虚拟触屏（`IOHIDUserDeviceCreate*`） | ❌ macOS 27.2 内核拒绝，见 [probe/README.md](probe/README.md) |
-| 视频链路 / S Pen | ⏳ 待做 |
-
-结论：在 27.2 上走**真 USB HID 设备**，Mac 侧不需要注入代码，系统自己接管触摸。
-
-## 结构
+平板上显示 Mac 的画面，手指在平板上按下时 Mac 收到的是**真正的多点触控事件**（`BKDirectTouchState`，不是鼠标模拟）。画面走 adb（USB 线），触控从平板回灌到 Mac。
 
 ```
-touch-mac/
-├── plan.md                  # 实施方案：架构、协议、阶段、风险
-├── android/
-│   ├── hid_gadget.sh        # root 平板 → USB HID 触屏（check/setup/setup-mt/tap/tap2/rollback）
-│   └── app/                 # 安卓 App：全屏触摸面 → /dev/hidg0（16 指，97 字节报告）
-├── mac/
-│   ├── touchbridge.m        # 软件虚拟触屏（27.2 上不可用，保留作参考）
-│   └── TouchLab/            # 验证 App：手势识别器 + NSTouch 日志
-├── probe/
-│   ├── README.md            # 探针结论：27.2 的 entitlement 墙、隐藏接口清单
-│   ├── screeninfo.m         # 打印显示器 touchCapabilities
-│   ├── vnat.m / vkeyb.m / vtouch.m / vtcreate.m   # 虚拟 HID 尝试（预期失败）
-│   └── build.sh
-└── tools/
-    ├── send_touch.py        # 给 touchbridge 发触摸（联调）
-    └── demo_tap.py          # 单指 + 双指演示
+┌────────────── 平板 (Android) ──────────────┐        ┌──────────── Mac ─────────────┐
+│  TouchBridge App                           │        │                              │
+│   ├─ SurfaceView / MediaCodec  ← H.264/HEVC│◀──TCP──┤ 47779 视频+音频 (TCP)        │
+│   ├─ TouchSurface  触控 → 行协议 ──────────┼──TCP──▶│ 47777 触控 (TCP)             │
+│   └─ 设置面板 ─────────────────────────────┼──TCP──▶│ 47781 设置/控制 (TCP)        │
+└────────────────────────────────────────────┘  adb   │                              │
+                                                 reverse│ touchbridge (Rust)          │
+                                                        │   ├─ HTTPS /launch  → Sunshine│
+                                                        │   ├─ RTSP 握手              │
+                                                        │   ├─ UDP 收视频/音频         │
+                                                        │   └─ ENet 控制流 (加密)      │
+                                                        │            │                 │
+                                                        │   Sunshine.app (已签名)      │
+                                                        │     └─ libvirtualhid         │
+                                                        │          └─ IOHIDUserDevice  │
+                                                        │               ↓ displayUUID  │
+                                                        │   WindowServer → BKDirectTouchState
+                                                        └──────────────────────────────┘
 ```
+
+## 为什么必须这么绕
+
+1. **自己造虚拟触屏没有权限。** macOS 27 起，用户态创建虚拟 HID 需要 `com.apple.developer.hid.virtual.device` entitlement；这个 entitlement 只有 Apple 签发的 Developer ID + 描述文件能拿到，自签会被内核直接 SIGKILL。
+2. **物理 USB HID 触屏也不行。** 逆向结论（见 [analysis/root-cause.md](analysis/root-cause.md)）：WindowServer 判断「这个服务是不是某块屏的数字化仪」时，读的是 **HID 服务对象的顶层属性 `displayUUID`**。物理 HID 的 Event Service 顶层属性由内核驱动 `AppleUserHIDEventDriver` 在创建时就定死，白名单里没有 `displayUUID`；用户态注入只会落进 `HIDEventServiceProperties` 子字典 → 日志 `ignoring digitizer event ... from unsupported service`。
+3. **唯一现成可用的注入通道，是本机已签名的 Sunshine（CanvasHost/Lumen）。** 它用 `IOHIDUserDeviceCreateWithProperties` 创建虚拟触屏，创建字典里直接带 `Product / VendorID / ProductID / ReportDescriptor / displayUUID / CGDirectDisplayID / DisplayIntegrated / DigitizerCollectionDispatch` —— 这八个键让它成为合法的数字化仪。我们不改它的二进制、不碰它的签名，只是**以 Moonlight 客户端的身份连上去**，让它在会话期间替我们创建那块虚拟触屏（`VoidLink HID Touchscreen`）。
+
+所以本项目的定位是：**复用 Sunshine 的虚拟 HID，把它当作「屏幕 + 触控注入器」**，自己只负责画面中转、触控转发和参数控制。
 
 ## 快速开始
 
-### 1. 编译验证工具
+### 依赖
+
+| 依赖 | 说明 |
+| --- | --- |
+| macOS 27+ | 需要 `__builtin_available(macOS 27.0)` 的虚拟触控路径 |
+| [Sunshine.app](https://github.com/The-Fried-Fish/CanvasHost) | 提供 `/launch`、RTSP、libvirtualhid 编码/触控 |
+| Rust（cargo 1.9x） | 编译 `bridge-rs` |
+| Android SDK（`aapt2`/`d8`/`apksigner`/`adb`） | 编译平板 App，本机不需要 gradle、不需要 NDK |
+| 平板 + USB 线 | adb 连接，`adb reverse` 承载全部数据 |
+
+### 1. 编译
 
 ```bash
-./probe/build.sh            # → probe/build/screeninfo 等
-./mac/TouchLab/build.sh     # → mac/TouchLab/build/TouchLab.app
-./android/app/build.sh      # → android/app/build/TouchPad.apk（不用 Gradle）
+cd bridge-rs && cargo build --release && cd ..
+android-app/build.sh          # 输出 android-app/build/touchbridge.apk
 ```
 
-### 2. 平板侧（root）
+### 2. 配对（一次性）
+
+Sunshine 的 HTTPS 对每个请求都校验客户端证书，必须让桥的证书出现在它的已配对列表里：
 
 ```bash
-adb push android/hid_gadget.sh /data/local/tmp/
-adb tcpip 5555 && adb connect <平板IP>:5555     # 先切无线，USB 会断
-adb shell su -c 'sh /data/local/tmp/hid_gadget.sh check'
-adb shell su -c 'sh /data/local/tmp/hid_gadget.sh setup'      # 单指，先用 tap 验证链路
-adb shell su -c 'sh /data/local/tmp/hid_gadget.sh tap'
+bridge-rs/pair.sh                                   # 写入 ~/.config/sunshine/sunshine_state.json
+osascript -e 'quit app "Sunshine"'; sleep 2; open -a /Applications/Sunshine.app
 ```
 
-回滚：`adb shell su -c 'sh /data/local/tmp/hid_gadget.sh rollback'`。
+> 官方配对流程要在 Web UI 上点 PIN，而那个密码在 state 里只有 sha256 哈希，无法反推。直接写 `named_devices` 是等价且唯一免 PIN 的做法。`bridge-rs/pair.sh --revert` 可撤销。
 
-> ⚠️ **失联救援**：绑定 gadget 后，USB 上的 adb（f_fs）会随默认 gadget `g1` 一起被解绑，有线 adb 必然消失。
-> 如果此时又没开无线 adb，唯一的恢复办法是在平板上**重启**（configfs 的 gadget 只存在于运行时，不持久化），
-> 或者在本机的 root 终端（Termux 等）里跑 `rollback`。
-> 所以脚本在绑 UDC 前会检查 `service.adb.tcp.port`，没开无线 adb 会拒绝执行；确实要冒险就加 `--force`。
-
-### 2b. 多点（16 指）
+### 3. 安装 App
 
 ```bash
-# 换 16 指描述符（97 字节报告），重新枚举
-adb shell su -c 'sh /data/local/tmp/hid_gadget.sh setup-mt'
-adb shell su -c 'sh /data/local/tmp/hid_gadget.sh tap2'       # 两指捏合，应触发缩放
-
-# 装 App：整个平板变成触摸面，每根手指实时写进 /dev/hidg0
-./android/app/build.sh
-adb install -r android/app/build/TouchPad.apk
+adb install -r android-app/build/touchbridge.apk
 ```
 
-App 用 `su -c "cat > /dev/hidg0"` 的管道写报告（绕开 SELinux 对普通 App 写 hidg 设备的限制），所以：
-第一次打开会弹 root 授权，必须允许；没跑 `setup-mt` 时状态栏会提示写入失败。
-
-### 3. Mac 侧验证
+### 4. 启动
 
 ```bash
-./probe/build/screeninfo                          # 期望 touchCaps=1
-./mac/TouchLab/build/TouchLab.app/Contents/MacOS/TouchLab /tmp/touchlab.log
+bridge-rs/run.sh setup    # adb reverse tcp:47777/47779/47781
+bridge-rs/run.sh -d       # 后台常驻（日志 /tmp/touchbridge.log）
 ```
 
-`/tmp/touchlab.log` 出现 `[touch] began/moved/ended` 表示拿到原生触摸；只有 `[mouse]` 则还是鼠标模拟。
+然后打开平板上的 **TouchBridge**。
 
-> 注意：App 是全屏黑底，视频镜像（第 3 阶段）还没接上。现阶段它只用来验证「平板上的手指 → Mac 原生直触」这条链路；
-> 等镜像做好后，会改成透明浮层或把触摸采集并进镜像播放器。
+桥是**按需会话**：平时只监听端口不碰 Sunshine；平板 App 连上 47777 才唤醒 Sunshine、跑 `/launch`、建 RTSP 会话；App 断开 3 秒后自动 `/cancel` 收尾，虚拟触屏随之消失（`hidutil list | grep -i voidlink` 会变空）。
 
-## 下一步
+## 传输层：为什么是 TCP over adb，能不能换
 
-1. **实测多点**：`setup-mt` + App，在访达/Safari 里试双指缩放和滚动，确认 16 指报告被正确解析。
-2. **触控 UI**：打开 Finder 看红绿灯是否放大、菜单是否加高。
-3. **视频**：ScreenCaptureKit + VideoToolbox → 平板 MediaCodec，USB 或 WiFi 传输；App 改成透明浮层或内嵌播放器。
-4. **S Pen**：第二个 HID 设备（Pen collection，带压感/倾斜/悬停）。
+**adb 线上跑的不是 TCP/IP。** USB 这一段是 adbd 自己的协议（bulk 端点 + 固定头 + 载荷），`adb reverse tcp:47777` 只是「在设备侧监听一个 TCP socket、在主机侧也开一个 TCP socket、中间由 adbd 搬运字节」。所以「TCP 还是 UDP」只在两端 socket API 的层面成立。
 
-## 背景
+| 方案 | 可用性 | 实测/预期 | 结论 |
+| --- | --- | --- | --- |
+| `adb reverse tcp:`（当前） | ✅ | 触控单向 0.15–0.78 ms；视频流 3.5 ms | 采用 |
+| `adb reverse udp:` | ❌ adb 不支持（只有 `tcp:` / `localabstract:`） | — | 不可用 |
+| USB 网络共享 + 直连 UDP | ✅ 平板开「USB 网络共享」后走 `rndis0` | 省掉 adbd 一层，理论再省 1–2 ms，但多一层 IP/NAT，且要自己处理丢包 | 可选实验 |
+| `adb exec-out` 管道 | ✅ 仍是 adbd | 少一次 socket 转接，收益未测 | 可选实验 |
+| libusb / AOA 裸 bulk | ✅ 但平板要进 accessory 模式 | 可控性最高，等于自己写 adb | 成本过高 |
+| Wi-Fi UDP（不走线） | ✅ | ping `avg 36.7 ms / max 123.8 ms` | 比 USB 差，不采用 |
 
-- Apple TN3212：Sidecar 触摸只能从 `NSGestureRecognizer` 收到，`NSIsTouchNative` 可关闭 AppKit 的鼠标模拟。
-- 27.2 的软件虚拟触屏被 `IOHIDResourceDeviceUserClient` 的 entitlement 拦住（root 也不行），细节与证据见 [probe/README.md](probe/README.md)。
+**为什么最后选 TCP：** 视频帧必须完整（少一个分片就是花屏/绿屏），TCP 的重传正好省掉这份麻烦；而且 adb 这一段本身已经是可靠传输，实测 3.5 ms 已经很低，换 UDP 收益有限、风险更大。
+
+**另外，之前那 14 ms 的延迟不是 TCP 的锅。** adbd 对「只下行、没有上行流量」的 reverse socket 会攒包，小包要等十几毫秒才发；给视频 socket 每 5 ms 写 1 个字节的心跳后，延迟从 `17.5 ms → 3.5 ms`。这条心跳就写在 `VideoClient` 里。
+
+## 参数与设置
+
+平板右上角 **⚙** 打开设置面板，可改：分辨率（1280x720 / 1920x1080 / 2560x1440）、帧率（30/60/90/120）、码率（10–80 Mbps）、HEVC、HDR/10-bit、串流音频、左上角延时显示。点「应用并重连」后桥会 `exec` 一个新进程重启会话（约 1 秒断线）。
+
+设置也直接存在 `~/.config/touchbridge/settings`：
+
+```ini
+width=1920
+height=1080
+fps=60
+bitrate=40000
+hevc=1
+hdr=0
+audio=1
+```
+
+桥的命令行参数（都会覆盖文件）：`--width --height --fps --bitrate --hevc/--no-hevc --hdr/--no-hdr --audio/--no-audio`。
+
+设置口协议（`127.0.0.1:47781`，行协议）：
+
+```
+get                → #cfg width=1920 height=1080 fps=60 ...
+set fps=120        → #ok
+apply              → #applied（桥保存设置并重启自己）
+```
+
+### 中转协议（App 侧）
+
+`47777`（触控，纯文本行）：
+
+| 行 | 含义 |
+| --- | --- |
+| `d/m/u <id> <x> <y>` | 按下/移动/抬起，坐标 0..1，原点左上 |
+| `c` | 全部抬起 |
+| `i` | 请求关键帧 |
+| `p` | 时钟探测 → `#pong <us>` |
+| `h` | 心跳 → `#hb <us>` |
+| — | 服务端下发 `#aspect <ratio>` 与 `#t0 <us>` |
+
+`47779`（视频/音频，二进制）：`u8 type + u32 BE len + payload`，`type` 为 `0x01` 参数集（`u8 codec` + Annex-B SPS/PPS）、`0x02` 视频帧（`u64 BE pts | u8 flags | u64 BE send_us | AU`）、`0x03` 音频（`u64 pts | PCM s16le 48k 立体声`）、`0x04` 时钟 tick。
+
+## 实测数据
+
+端到端（单帧从桥发出 → 平板 `releaseOutputBuffer`），1920×1080：
+
+| 段 | 耗时 | 说明 |
+| --- | --- | --- |
+| 桥内排队 | ~0.0 ms | 组帧后立即写 socket |
+| adb reverse | 3.5–4.2 ms | 5 ms 心跳前是 17.5 ms |
+| 解码 + 合成 | 8.7–9.1 ms | 硬件解码 ~4 ms + 等 vsync 平均 ~4 ms |
+| **合计** | **13 ms 左右** | 状态行显示的数字 |
+
+编解码对比（同机同链路，各 20 秒）：
+
+| 编码 | 解码+合成 | 合计 |
+| --- | --- | --- |
+| **HEVC（8/10-bit）** | **8.9 ms** | **13 ms** |
+| H.264 | 26.5 ms | 30 ms |
+
+H.264 反而慢 3 倍：Sunshine 的 H.264 编码器带 B 帧/重排序窗口，解码器要多等一个 GOP 重排；HEVC 是低延迟无 B 帧。AV1 在 macOS 上没有编码器，不可用。
+
+## 故障排查
+
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| 画面整体变绿 | 解码队列溢出导致参考帧断裂（码率过高，adb 送不过来）。桥和平板都会立刻请求关键帧，通常 1 帧内恢复。仍频繁出现就把码率降到 40 Mbps 以下，或在设置里关掉 HDR/10-bit。 |
+| 没有声音 | 三星的 `AudioHardening` 会把没有音频焦点的播放静音。App 已在 `onResume` 申请 `AUDIOFOCUS_GAIN`；仍无声先确认 Mac 上真的有声音在播（`stream_audio = true`，串流期间 Mac 本地扬声器会被静音，这是设计）。 |
+| 连不上 / 一直 `connecting` | `adb reverse --list` 看三个端口是否还在；`bridge-rs/run.sh setup` 重建。 |
+| 端口被占 | 历史上 7000 被 macOS ControlCenter（AirPlay 接收）占用，现已固定用 4777x。 |
+| 会话中途自己结束 | 桥有 10 秒看门狗：Sunshine 的 video/audio/control 任一路 ping 超时就会收尾。看 `/tmp/touchbridge.log` 里的 `Ping Timeout`。 |
+| 面板打不开 | 齿轮在右上角，点 `(2700, 100)` 附近。 |
+| Sunshine 启动慢 | 它退出要等约 10 秒；`open -a` 期间重复启动无效，桥会自动重试 60 次。 |
+
+## 已知边界
+
+- **没有真 HDR。** 这份 Sunshine 在 macOS 上 `is_hdr()` 恒为 false、没有 HDR 元数据实现，`dynamicRangeMode=1` 只会回落到 SDR。能拿到的是 **HEVC Main10 10-bit SDR**；要真 HDR10 必须改 Sunshine 源码重编，而重编会丢掉虚拟 HID 的签名 → 得不偿失。
+- **多点触控只到单指针。** WindowServer 侧确实收到多个 contact（`pathsSeen: 1 2`），但 App 层只收到鼠标事件，`NSTouch` 不投递。这条链在 macOS 上等价于单点触屏（tap-to-click）。
+- 平板持续解码 + 显示，耗电和发热都高于本地使用。
+- 会话期间必须有 USB 连接；Wi-Fi 延迟明显更差（未做优化）。
+
+## 目录
+
+```
+bridge-rs/            Mac 侧桥（Rust 单二进制）
+  src/launch.rs       HTTPS /launch、/cancel（客户端证书）
+  src/rtsp.rs         OPTIONS/DESCRIBE/SETUP/ANNOUNCE/PLAY + SDP
+  src/control.rs      ENet 控制流 + AES-128-GCM（触摸上报、IDR 请求、ping）
+  src/video.rs        UDP 收流、RTP/NV 头解析、分片组帧、SPS/PPS 提取
+  src/audio.rs        UDP 收 Opus → libopus 解码 → PCM
+  src/relay.rs        把视频/音频转成 47779 上的帧流
+  src/touch.rs        47777 行协议 → 触摸事件
+  src/control_port.rs 47781 设置/控制口
+  src/settings.rs     ~/.config/touchbridge/settings
+  vendor/enet/        Moonlight fork 的 ENet（C，随二进制编译）
+  certs/              客户端证书（配对用）
+  pair.sh             写 Sunshine 已配对列表
+  run.sh              setup / -d / 前台
+android-app/          平板 App（纯 Java，手工 aapt2 + d8 打包）
+  src/.../MainActivity.java   窗口、触控采集、活动框、时钟同步
+  src/.../VideoClient.java    收流、MediaCodec 解码、AudioTrack 播放
+  src/.../SettingsPanel.java  设置面板
+  src/.../AudioPlayer.java    PCM 播放
+  src/.../H264Sps.java        参数集解析（宽高修正）
+  build.sh                    无 gradle 打包
+analysis/             逆向与设计记录
+  root-cause.md       为什么物理 USB HID 与自签虚拟 HID 都不可行（含地址级证据）
+  native-touch-bridge.md  桥接链路设计、延时拆解、踩坑记录
+probe/                当初取证用的小工具（属性注入、feature flag、类转储…），仅供参考
+tools/cache_stubs.py  共享缓存 stub → 导入符号解析
+Handoff.md            研究过程交接记录（历史，不代表当前实现）
+```
+
+## 踩过的坑（写下来免得重犯）
+
+1. **adb reverse 攒包** —— 只下行的小包会等十几毫秒，必须定期写心跳（已内置）。
+2. **cargo 不会因为改了 C 文件就重编 cc 产物** —— `build.rs` 忘了 `rerun-if-changed` 时，改了 shim 签名会直接 SIGSEGV。
+3. **libvirtualhid 的客户端证书要 X.509 v3** —— LibreSSL 默认签出来是 v1，rustls 直接拒。
+4. **`encoderCscMode=2` 会让画面偏绿** —— 这份 Sunshine 的 10-bit 路径下取 Rec.709 有问题，用 0（Rec.601）正常。
+5. **安卓 `MediaCodec` 解 Opus 会抛 `Invalid to call at Released state`** —— 改为 Mac 侧 libopus 解码、传 PCM。
+6. **主线程不能写 socket** —— `NetworkOnMainThreadException`，改队列 + 独立发送线程。
+7. **`adb shell am start` 不会重启已有进程** —— 改完 UI 要 `am force-stop` 再启动。

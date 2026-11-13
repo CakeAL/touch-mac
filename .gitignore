@@ -36,13 +36,12 @@ tools/extractor/dyld-shared-cache-extractor/
 
 probe/svcprop
 
-# 桥接客户端编译产物
-bridge/client
-bridge/touchwatch
-
 # 平板 App 构建产物
 android-app/build/
 android-app/debug.keystore
+
+# 平板 App / 桥的构建产物
+android-app/build/touchbridge.apk
 
 # Rust bridge
 bridge-rs/target/
