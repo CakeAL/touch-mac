@@ -29,7 +29,7 @@ impl Default for Settings {
             width: 1920,
             height: 1080,
             fps: 60,
-            bitrate: 40000,
+            bitrate: 60000,
             hevc: true,
             hdr: false,
             audio: true,
@@ -177,7 +177,8 @@ pub fn size_for(res: u32, screen: Option<(u32, u32)>) -> (u32, u32) {
     if res == 0 {
         if let Some((w, h)) = screen {
             if w > 0 && h > 0 {
-                return ((w + 1) & !1, (h + 1) & !1);
+                // 编码器要求 16 对齐（2800 可以，1752 不行 → 1744）。
+                return (w & !15, h & !15);
             }
         }
         return (1920, 1080);

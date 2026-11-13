@@ -211,7 +211,21 @@ async fn run_session(
         let _ = launch::cancel(&lp, &a.cert, &a.key);
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
-    let url = launch::launch(&lp, &a.cert, &a.key)?;
+    // Sunshine 上一个会话要几百毫秒才真正结束；期间 /launch 会返回 400。
+    let mut attempt = 0;
+    let url = loop {
+        match launch::launch(&lp, &a.cert, &a.key) {
+            Ok(u) => break u,
+            Err(e) => {
+                attempt += 1;
+                if attempt >= 6 {
+                    return Err(e);
+                }
+                eprintln!("[launch] 重试 {attempt}: {e}");
+                tokio::time::sleep(Duration::from_millis(800)).await;
+            }
+        }
+    };
     eprintln!("[launch] session url = {url}");
     let (rh, rp) = parse_rtsp(&url)?;
 

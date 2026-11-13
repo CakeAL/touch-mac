@@ -100,7 +100,7 @@ final class SettingsPanel {
         panel.addView(status);
 
         if (screenW > 0 && screenH > 0) {
-            resolutions[3] = "点对点 (" + screenW + "×" + screenH + ")";
+            resolutions[3] = "点对点 " + screenW + "×" + screenH + " (" + screenH + "p)";
         }
         resSpin = addRow("分辨率", resolutions);
         fpsSpin = addRow("帧率 (fps)", RATES);

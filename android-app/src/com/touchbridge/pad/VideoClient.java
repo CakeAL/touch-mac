@@ -139,6 +139,7 @@ public final class VideoClient {
     private Surface appliedSurface;
     private boolean needKey = true;
     /** 呈现时间基准：把码流 pts 映射到本机 nanoTime，交给 SurfaceFlinger 定时上屏。 */
+    private long lastResyncReqMs = 0;
     private long presBasePtsUs = -1;
     private long presBaseNs = 0;
     private int debugFrames = 0;
@@ -539,7 +540,18 @@ public final class VideoClient {
                 // 解码器内部也可能积压：已送出但还没上屏的帧超过 2 个就直接丢非关键帧，
                 // 否则一旦解码慢于收流，延时会一路涨到几百毫秒。
                 if (f != null && !f.key && inflightSendUs.size() >= 3) {
+                    // 丢帧会让后续 P 帧参考缺失（表现为整屏绿），所以要重新等关键帧。
                     f = null;
+                    if (!needKey) {
+                        needKey = true;
+                        long now = SystemClock.elapsedRealtime();
+                        if (now - lastResyncReqMs > 1500) {
+                            lastResyncReqMs = now;
+                            Log.i(TAG, "video drop -> request IDR");
+                            Runnable r = idrRequester;
+                            if (r != null) r.run();
+                        }
+                    }
                 }
                 if (f != null && !f.key && frames.size() > 2) {
                     // 队列积压时丢掉非关键帧，避免越追越慢（只保留最新几帧）。
