@@ -3,8 +3,8 @@
 **项目名称：** Android USB HID Gadget → macOS Native Direct Touch  
 **交接日期：** 2026-11-13  
 **接手 Agent：** OpenCode  
-**项目阶段：** 根因已闭环（`displayUUID` 顶层属性必须在对象创建时给出）；免授权物理直连路线判定不可行，转入架构决策  
-**优先级：** DriverKit dext 可行性验证（见 §13）
+**项目阶段：** 根因已闭环；按用户指令转向“复用 Sunshine/VoidLink 已签名虚拟 HID”，**桥接链已跑通**（平板触控 → Mac 桥接客户端 → Sunshine → VoidLink → `BKDirectTouchState` → 应用指针事件），见 §14 与 `analysis/native-touch-bridge.md`  
+**优先级：** 平板侧视频/触控客户端的架构选择（见 §14.6）
 
 ---
 
@@ -860,3 +860,55 @@ OpenCode 应输出：
 1. `UNVERIFIED` 闭环：用 root 写 `/Library/Preferences/FeatureFlags/Domain/backboardd.plist`（`SupportExternalTouchscreen = { Enabled = 1; }`）+ 重启 WindowServer，确认 §2A 结论 5 的预测（仍失败）。仅作记录，不指望成功。
 2. `UNVERIFIED`：确认 `kUSBContainerID` 旁路是否只在 USB4/DP-alt 显示器成立（本例 DM72u 为 DisplayPort，SAC/10085，无该键）。
 3. 用 `probe/svcprop.c` 复测任意设备的服务属性（BackBoard 同款 API）；README 里可补一条：`./probe/svcprop SAMSUNG` 应显示 `displayUUID <NULL>`，这是最快的根因验证。
+
+## 14. 新阶段：复用 VoidLink 虚拟触控屏的桥接链（2026-11-13 晚）
+
+用户指令（`m00539`）：停止 IORegistry / HID Event Service 运行时属性注入，改为复用 Sunshine/VoidLink
+**已签名**的虚拟 HID 设备；保持 SIP、无受限 entitlement、不修改 Sunshine 二进制、不破坏其签名。
+架构猜想：平板提交触控 → Mac 上模拟 Moonlight 客户端 → Sunshine → libvirtualhid → 原生触控。
+
+### 14.1 已建成的东西
+
+| 路径 | 作用 |
+|---|---|
+| `bridge/client.c` | 最小 Moonlight 客户端（moonlight-common-c），完成 `/launch`+RTSP 后只发 `SS_TOUCH_PACKET`，视频/音频丢弃；`--stdin` 模式从 FIFO 读触控指令 |
+| `bridge/session.sh` | 一次会话管理：cancel → `/launch` → client + FIFO + 平板转发；`--no-tablet` 可手动灌指令 |
+| `bridge/tablet_touch.py` | `adb exec-out getevent` 解析 MT-B 协议（SLOT/TRACKING_ID/POSITION）→ 归一化 → FIFO |
+| `bridge/touchwatch.m` | 全屏 AppKit 探针，逐条打印收到的鼠标/手势事件，用于验收应用层投递 |
+| `bridge/add_client_identity.sh` | 把自签客户端证书写进 `sunshine_state.json` 的 `named_devices`（官方唯一免 PIN 捷径） |
+
+### 14.2 关键实测（VERIFIED）
+
+- 会话建立后 `hidutil list` 出现 `VoidLink HID Touchscreen`（`0x1209`/`0x4c53`/Virtual/page 0xD usage 4），
+  会话结束即消失。
+- `probe/svcprop VoidLink` 直接读到 **`displayUUID = 8BF51424-0C57-4680-A7F9-9092F20311B9`**（主显示器），
+  而 Samsung 同类查询是 `NULL` —— 这就是“虚拟可接受、物理被拒”的决定性差异。
+- WindowServer：`BKIOHIDService` 带 `displayUUID` → `digitizer attached` → `init: <BKDirectTouchState ...
+  builtIn: NO; displayIntegrated: YES; authenticated: NO; displayUUID: ...>` → `contact N presence: touching`。
+- 双指：`pathsSeen: 1 2`、`down: 2 / up: 2`；但应用层只有单指针、无 NSTouch 多点投递。
+
+### 14.3 语义边界
+
+- 单指点按/拖动可靠；点按是“抬手才点击”（tap-to-click）。
+- 双指不产生多点手势（无 magnify/rotate/scroll）⇒ 该路径等价单点触屏。
+- 延迟：client `LiSendTouchEvent` → WindowServer contact ≈ 1 ms；应用层点击取决于抬手时机。
+
+### 14.4 会话必须“有视频”
+
+`/launch` → RTSP ANNOUNCE 后服务端无条件起 audio/video 线程，各自 10 s ping 超时；
+LCC 侧 10 s 无视频包即 `ML_ERROR_NO_VIDEO_TRAFFIC`。可以不解码（fake 回调丢帧），
+但**不能只建控制流**。这也意味着：桥接客户端占用了唯一会话，平板自身看不到 Mac 画面。
+
+### 14.5 坑
+
+- `serverCodecModeSupport` 必须非 0（填 `SCM_H264`），否则 `LiStartConnection` 返回 -1。
+- 不带 `corever` 的 `/launch` 才给明文 `rtsp://`。
+- `Desktop` 的 appid 是 `881448767`。
+- 设备创建有 `ready()` 轮询（≈1.15 s 上限），首次触摸可能早到而被丢弃。
+
+### 14.6 下一步（需要决策）
+
+1. **A（当前可用）**：Mac 端桥接 + `adb` 转发触控。平板不显示 Mac 画面，只当触控面；改动最小。
+2. **B（产品形态）**：改 Moonlight Android 客户端（把 `Game.java:2035-2042` 的 `sendTouchEvent` 打开），
+   平板既看画面又发原生触控，服务端不动。需要 Android SDK/NDK 构建 APK。
+3. **C**：Mac 桥接收流后再转给平板（自研传输），工作量最大。

@@ -35,3 +35,7 @@ tools/IOHIDFamily/
 tools/extractor/dyld-shared-cache-extractor/
 
 probe/svcprop
+
+# 桥接客户端编译产物
+bridge/client
+bridge/touchwatch
