@@ -16,3 +16,20 @@ probe/vtcreate
 *.log
 
 *.apk
+
+# 逆向探针编译产物
+probe/ffprobe
+probe/hidclass
+probe/hidclass2
+probe/hidproto
+probe/hidproto2
+probe/vhid_test
+probe/vhid_signed
+
+# 共享缓存提取产物
+tools/extractor/build/
+probe/touch-check
+
+# 外部克隆（本地参考，不入库）
+tools/IOHIDFamily/
+tools/extractor/dyld-shared-cache-extractor/
