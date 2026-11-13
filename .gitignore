@@ -33,3 +33,5 @@ probe/touch-check
 # 外部克隆（本地参考，不入库）
 tools/IOHIDFamily/
 tools/extractor/dyld-shared-cache-extractor/
+
+probe/svcprop

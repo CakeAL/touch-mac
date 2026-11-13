@@ -92,6 +92,26 @@
 - `IORegistryEntrySetCFProperty`（Event Service）→ 运行时属性表，不参与 `_setUpInitialProperties` 的 `propertyForKey:` 查询
 - `IOHIDDeviceSetProperty`（设备对象）→ 只改设备对象，且 `setSystemProperties` 仍过滤
 
+### 3.2 用 BackBoard 同款 API 直接实测（决定性）
+
+新探针 `probe/svcprop.c` 用 `IOHIDEventSystemClientCreate` + `IOHIDEventSystemClientCopyServices` + `IOHIDServiceClientCopyProperty`（即 `-[BKIOHIDService propertyForKey:]` 走的同一条链路）读 Samsung 服务，输出（`VERIFIED`，2026-11-13 实测）：
+
+```text
+== serviceID 0x8dd531a01f5532a8  product=SAMSUNG_Android
+  Product                      "SAMSUNG_Android"
+  displayUUID                  <NULL>          ← 唯一缺失项，BackBoard 在此判死
+  DisplayIntegrated            true            ← 已有，仍被拒
+  DigitizerCollectionDispatch  true            ← 已有，仍被拒
+  Built-In                     <NULL>          ← 非内建（走 "unsupported service" 分支）
+  Transport                    "USB"
+  PrimaryUsagePage             13 (0xD)
+  PrimaryUsage                 4
+```
+
+由此可排除“还差某个别的属性”“必须标内建”等猜测：**除 `displayUUID` 之外，BackBoard 需要的输入全都已就位**。
+
+附带观察（`VERIFIED`）：`IOHIDServiceClientGetRegistryID` 在 macOS 27 返回的是**不透明的服务 ID**（`0x8dd531a01f5532a8`），不是 IORegistry EntryID（`0x10004bf39`）。写探针时不要用 EntryID 去匹配服务，改用 `Product` 等属性过滤。
+
 ---
 
 ## 4. 被证伪的假说
@@ -99,7 +119,7 @@
 | 假说 | 结论 | 证据 |
 |---|---|---|
 | H1：属性有“注册时机窗口”，早写就能被读到 | 伪 | 顶层属性只能在创建时给出；`CopyProperty` 读服务端属性表，不读父链 |
-| H2：WindowServer 还有别的接受条件（如 `DisplayIntegrated`、`DigitizerCollectionDispatch`） | 伪 | 物理服务顶层已有 `DisplayIntegrated=1`（`IOHIDEventService.cpp:783` 对 Digitizer usage 自动设置），仍被拒；唯一判据是 `displayUUID` |
+| H2：WindowServer 还有别的接受条件（如 `DisplayIntegrated`、`DigitizerCollectionDispatch`） | 伪 | 用 BackBoard 同款 API 实测，Samsung 服务已返回 `DisplayIntegrated=true`、`DigitizerCollectionDispatch=true`、`Transport=USB`、page `13`、usage `4`，仍被拒；唯一缺失项就是 `displayUUID`（见 §3.2） |
 | H3：写 `HIDEventServiceProperties` 子字典就够了 | 伪 | 子字典不被 `IOHIDServiceClientCopyProperty` 读取（实测 NULL） |
 | H4：用 `backboardd/SupportExternalTouchscreen` 开关走 Apple 官方外部触屏路径 | 伪（`INFERRED`，证据强） | 开关只让 `_queue_displayUUIDForDigitizerService:` 回退到 `chamoisDisplayUUID`；而 `setChamoisDisplayUUID:` 在全系统只出现 2 次（方法名 + 其 block 符号），无 `_objc_msgSend$setChamoisDisplayUUID:` 桩，`SkyLight`/其他 BackBoard 框架为 0 次 → 该 ivar 永不被赋值 |
 | H5：改 HID 描述符/让设备自称内建（`Built-In=1`） | 伪（SIP 下） | 内建分支确实绕过 `displayUUID`，但 `isBuiltin` 来自服务顶层 `Built-In` 属性，只能由内核驱动在创建时给（USB 设备恒为 0） |
@@ -136,6 +156,7 @@
 | `probe/ffprobe.c` | 查询 `_os_feature_enabled_impl`；`FEATUREFLAGS_ENABLED=backboardd/SupportExternalTouchscreen ./ffprobe backboardd SupportExternalTouchscreen` → 1（格式已验证） |
 | `probe/hidclass.m` | 枚举 `HIDVirtualEventService` 方法/ivar（18 个实例方法、5 个 ivar） |
 | `probe/hidproto.m` | 枚举 HID.framework 导出的类 |
+| `probe/svcprop.c` | 用 BackBoard 同款 `IOHIDServiceClientCopyProperty` 读服务属性（§3.2 决定性实测） |
 | `tools/cache_stubs.py` | 共享缓存 stub → 导入符号 |
 | `tools/extractor/` | dyld shared cache 提取 |
 
@@ -202,7 +223,7 @@ hidutil property --matching '{"Product":"VoidLink HID Touchscreen"}' --get displ
 1. `UNVERIFIED`：DriverKit dext 的事件服务能否发布顶层 `displayUUID`（决定架构 A 是否成立）。验证方式：写最小 dext（需 entitlement），在其 `Start` 里 `SetProperty("displayUUID", uuid)` 后 `RegisterService()`，再用 `hidutil property --get displayUUID` 读。
 2. `UNVERIFIED`：`/Library/Preferences/FeatureFlags/Domain/backboardd.plist` 覆盖 + 重启 WindowServer 是否让 `backboardd/SupportExternalTouchscreen` 生效（需 root；按 §4-H4 预期无效，仅作闭环记录）。
 3. `UNVERIFIED`：`kUSBContainerID` 旁路是否只在 USB4/DP-alt 显示器上成立（本例显示器为 DisplayPort，SAC/10085，无该键）。
-4. 待办（低成本）：把本报告 §1-§3 的地址与结论回写 `Handoff.md`，并把 `probe/hidclass.m`、`probe/hidproto.m` 纳入版本管理。
+4. 已完成：本报告 §1-§3 的地址与结论已回写 `Handoff.md`（新增 §2A、§13），探针源码已入库。剩余未验证项 1、2、3 需要 Apple entitlement 或 root，当前环境无法闭环。
 
 ---
 

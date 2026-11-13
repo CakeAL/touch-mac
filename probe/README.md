@@ -73,6 +73,10 @@ HID digitizer (DisplayIntegrated)
 | `vkeyb.m` | 用同一 SPI 造虚拟键盘（证明是整类被拒，不是触屏特有） |
 | `vtouch.m` | 旧的 `IOHIDUserDeviceCreate` 尝试 |
 | `vtcreate.m` | 属性组合遍历 |
+| `touch-check.c` | 读 Samsung Event Service 及父链属性（Direct vs Search） |
+| `svcprop.c` | 用 BackBoard 同款 `IOHIDServiceClientCopyProperty` 读服务属性表 |
+| `ffprobe.c` | 查询 `_os_feature_enabled_impl` 开关 |
+| `hidclass.m` / `hidproto.m` | 运行时枚举 HID.framework 的私有类/方法/协议 |
 
 编译：`./build.sh` → `probe/build/`。
 
@@ -85,3 +89,20 @@ HID digitizer (DisplayIntegrated)
 - 平板端只需要一个标准 HID Touch Screen 描述符。
 
 已实测：安卓 root + configfs HID gadget → `touchCaps = 1`。见仓库根目录 [plan.md](../plan.md) 与 [android/hid_gadget.sh](../android/hid_gadget.sh)。
+
+## 6. 2026-11-13 修正：USB 直连也不需要 entitlement，但**过不了 displayUUID 判定**
+
+上面的结论只对了一半：USB 直连确实不需要 entitlement 就能被 HID 系统识别、被解析成 digitizer 事件，
+但 WindowServer 还需要该服务对象**自身的顶层属性 `displayUUID`**，而它只能在对象创建字典里出现。
+
+实测（`./svcprop SAMSUNG`）：
+
+```text
+displayUUID                  <NULL>      ← 缺这个，事件被丢
+DisplayIntegrated            true
+DigitizerCollectionDispatch  true
+Built-In                     <NULL>
+Transport                    "USB"
+```
+
+完整根因见 [analysis/root-cause.md](../analysis/root-cause.md)。

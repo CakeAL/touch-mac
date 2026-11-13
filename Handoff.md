@@ -187,6 +187,7 @@ BKDirectTouchState:
 - `IOHIDFamily/AppleUserHIDEventService.cpp:757-812` `setSystemProperties` 只把固定 `propKeys[]`（SurfaceDimensions / SensorPropertySupported / KeyboardEnabled* / ReportInterval / SupportsGlobeKey / GameController* / PointerAccelerationType / ScrollAccelerationType / DigitizerGestureCharacterState / SupportsInk / SupportedEventMask / SupportedKeyboardUsagePairs / SupportedVendorUsagePairs）提升为顶层
 - `:806` 注释原文 `// Publish remaining properties under "HIDEventServiceProperties" key` → 其余全部进入子字典，BackBoard 不读子字典
 - HID 内核栈根本不认识 `displayUUID`（`grep -ri uuid tools/IOHIDFamily` 为空）；实测 `hidutil property --matching '{"Product":"SAMSUNG_Android"}' --get displayUUID` → `(null)`
+- **决定性实测**（`probe/svcprop.c`，与 BackBoard 同款 API `IOHIDServiceClientCopyProperty`）：Samsung 服务返回 `Product=SAMSUNG_Android`、`Transport=USB`、`PrimaryUsagePage=13`、`PrimaryUsage=4`、`DisplayIntegrated=true`、`DigitizerCollectionDispatch=true`、`Built-In=<NULL>`、**`displayUUID=<NULL>`**。除 `displayUUID` 外别的输入全都就位
 
 **结论 4（VERIFIED）— 无授权时没有任何用户态写入点。**
 
@@ -858,4 +859,4 @@ OpenCode 应输出：
 
 1. `UNVERIFIED` 闭环：用 root 写 `/Library/Preferences/FeatureFlags/Domain/backboardd.plist`（`SupportExternalTouchscreen = { Enabled = 1; }`）+ 重启 WindowServer，确认 §2A 结论 5 的预测（仍失败）。仅作记录，不指望成功。
 2. `UNVERIFIED`：确认 `kUSBContainerID` 旁路是否只在 USB4/DP-alt 显示器成立（本例 DM72u 为 DisplayPort，SAC/10085，无该键）。
-3. 把 `probe/hidclass.m`、`probe/hidclass2.m`、`probe/hidproto*.m`、`probe/ffprobe.c`、`probe/vhid_test.c`、`tools/cache_stubs.py`、`tools/extractor/` 纳入 git。
+3. 用 `probe/svcprop.c` 复测任意设备的服务属性（BackBoard 同款 API）；README 里可补一条：`./probe/svcprop SAMSUNG` 应显示 `displayUUID <NULL>`，这是最快的根因验证。
