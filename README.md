@@ -80,6 +80,17 @@ bridge-rs/run.sh -d       # 后台常驻（日志 /tmp/touchbridge.log）
 
 桥是**按需会话**：平时只监听端口不碰 Sunshine；平板 App 连上 47777 才唤醒 Sunshine、跑 `/launch`、建 RTSP 会话；App 断开 3 秒后自动 `/cancel` 收尾，虚拟触屏随之消失（`hidutil list | grep -i voidlink` 会变空）。
 
+## macOS 本机预览（mac-app）
+
+不接平板时用这个：`mac-app/` 是一个 SwiftPM 小应用，开一个置顶悬浮窗显示桥转出的 Mac 画面，鼠标按下 / 拖动 / 抬起即向 `47777` 发**单点触控**（id 0），用来在同一台 Mac 上验证「画面 + 触控注入」整条链路。
+
+```bash
+cd mac-app && ./build.sh
+open build/TouchBridgeViewer.app
+```
+
+窗口是 `NSPanel`（`.nonactivatingPanel`），App 以 `.accessory` 运行：置顶悬浮但不抢前台焦点，点击画面不会把本 App 切到前台。构建、协议、排错见 [mac-app/README.md](mac-app/README.md)。
+
 ## 传输层：为什么是 TCP over adb，能不能换
 
 **adb 线上跑的不是 TCP/IP。** USB 这一段是 adbd 自己的协议（bulk 端点 + 固定头 + 载荷），`adb reverse tcp:47777` 只是「在设备侧监听一个 TCP socket、在主机侧也开一个 TCP socket、中间由 adbd 搬运字节」。所以「TCP 还是 UDP」只在两端 socket API 的层面成立。

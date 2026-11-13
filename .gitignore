@@ -45,3 +45,9 @@ android-app/build/touchbridge.apk
 
 # Rust bridge
 bridge-rs/target/
+
+# mac-app（SwiftPM）构建产物与运行日志
+mac-app/.build/
+mac-app/.cache/
+mac-app/build/
+mac-app/logs/
