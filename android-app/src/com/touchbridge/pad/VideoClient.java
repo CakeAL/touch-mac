@@ -536,6 +536,11 @@ public final class VideoClient {
                     wantResync = false;
                     needKey = true;
                 }
+                // 解码器内部也可能积压：已送出但还没上屏的帧超过 2 个就直接丢非关键帧，
+                // 否则一旦解码慢于收流，延时会一路涨到几百毫秒。
+                if (f != null && !f.key && inflightSendUs.size() >= 3) {
+                    f = null;
+                }
                 if (f != null && !f.key && frames.size() > 2) {
                     // 队列积压时丢掉非关键帧，避免越追越慢（只保留最新几帧）。
                     f = null;

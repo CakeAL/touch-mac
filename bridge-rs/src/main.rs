@@ -424,10 +424,6 @@ async fn main() -> Result<()> {
             }
             let (stop_tx, stop_rx) = watch::channel(false);
             let mut a2 = a.clone();
-            let sc0 = *screen_rx.borrow();
-            if sc0.2 > 0 && sc0.2 != a2.res {
-                a2.res = sc0.2; // 平板在设置里选的档位优先于桥本地的旧值
-            }
             if a2.width == 0 || a2.height == 0 {
                 let sc = *screen_rx.borrow();
                 let (w, h) = settings::size_for(

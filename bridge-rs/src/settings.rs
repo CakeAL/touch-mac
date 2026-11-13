@@ -165,13 +165,23 @@ pub fn parse_res(v: &str) -> Option<u32> {
         "1080" | "fhd" => Some(1080),
         "1440" | "2k" | "qhd" => Some(1440),
         "2160" | "4k" | "uhd" => Some(2160),
+        // 0 = 点对点：直接用平板屏幕像素，不缩放。
+        "0" | "native" | "point" | "dpad" => Some(0),
         _ => t.parse::<u32>().ok().filter(|n| *n >= 480 && *n <= 4320),
     }
 }
 
 /// 给定档位高度与屏幕比例，算出编码尺寸；宽度补成偶数（编码器要求）。
 pub fn size_for(res: u32, screen: Option<(u32, u32)>) -> (u32, u32) {
-    let res = if res == 0 { 1080 } else { res };
+    // res == 0：点对点，直接编平板原生像素（偶数对齐），平板不需要再缩放。
+    if res == 0 {
+        if let Some((w, h)) = screen {
+            if w > 0 && h > 0 {
+                return ((w + 1) & !1, (h + 1) & !1);
+            }
+        }
+        return (1920, 1080);
+    }
     let aspect = match screen {
         Some((w, h)) if w > 0 && h > 0 => w as f64 / h as f64,
         _ => 16.0 / 9.0,

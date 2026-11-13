@@ -601,8 +601,7 @@ public class MainActivity extends Activity {
                     Log.i(TAG, "link connected to " + HOST + ":" + PORT);
                     queue.clear();
                     if (screenPx != null) {
-                        queue.offer("s " + screenPx[0] + " " + screenPx[1] + " "
-                    + prefRes + "\n");
+                        queue.offer("s " + screenPx[0] + " " + screenPx[1] + "\n");
                     }
                     startReader(s);
                     startClockProbe();

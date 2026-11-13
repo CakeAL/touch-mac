@@ -43,9 +43,9 @@ final class SettingsPanel {
     private static final int CFG_PORT = 47781;
 
     /** 分辨率只选档位，具体宽高由桥按平板屏幕比例算。 */
-    private static final String[] RESOLUTIONS = {"1080p", "2K", "4K"};
-    private static final int[] RES_HEIGHTS = {1080, 1440, 2160};
-    private static final String[] RATES = {"30", "60", "90", "120"};
+    private String[] resolutions = {"1080p", "2K", "4K", "点对点"};
+    private static final int[] RES_HEIGHTS = {1080, 1440, 2160, 0};
+    private static final String[] RATES = {"15", "30", "60", "90", "120"};
     private static final String[] BITRATES = {"10", "20", "30", "40", "60", "80"};
 
     private final Activity act;
@@ -99,9 +99,23 @@ final class SettingsPanel {
         status.setText("读取桥参数…");
         panel.addView(status);
 
-        resSpin = addRow("分辨率", RESOLUTIONS);
+        if (screenW > 0 && screenH > 0) {
+            resolutions[3] = "点对点 (" + screenW + "×" + screenH + ")";
+        }
+        resSpin = addRow("分辨率", resolutions);
         fpsSpin = addRow("帧率 (fps)", RATES);
         brSpin = addRow("码率 (Mbps)", BITRATES);
+        resSpin.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                // 平板解码能力：1080p 能跑 60，2K/4K/点对点只有约 30。
+                // 按实测能力给默认帧率/码率：1080p 60fps、2K 30fps、4K 与点对点 15fps。
+                int h = RES_HEIGHTS[Math.max(0, pos)];
+                if (h == 1080) { fpsSpin.setSelection(indexOf(RATES, "60")); brSpin.setSelection(indexOf(BITRATES, "40")); }
+                else if (h == 1440) { fpsSpin.setSelection(indexOf(RATES, "30")); brSpin.setSelection(indexOf(BITRATES, "60")); }
+                else { fpsSpin.setSelection(indexOf(RATES, "15")); brSpin.setSelection(indexOf(BITRATES, "80")); }
+            }
+            @Override public void onNothingSelected(AdapterView<?> p) { }
+        });
 
         hevcBox = addCheck("HEVC 编码", true);
         hdrBox = addCheck("HDR / 10-bit（偶发绿屏时关闭）", true);
