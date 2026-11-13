@@ -10,6 +10,7 @@ use crate::audio::AudioPacket;
 pub const MSG_CONFIG: u8 = 0x01;
 pub const MSG_FRAME: u8 = 0x02;
 pub const MSG_AUDIO: u8 = 0x03;
+pub const MSG_TICK: u8 = 0x04;
 
 #[derive(Clone, Debug)]
 pub enum VideoMsg {
@@ -61,8 +62,15 @@ async fn handle(
     if let Some(cfg) = initial {
         write_msg(&mut sock, MSG_CONFIG, &cfg).await?;
     }
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
         tokio::select! {
+            _ = tick.tick() => {
+                // 纯延时探针：100ms 一条，平板端用到达时间 - 该时刻 量单程延时
+                let mut head = [0u8; 8];
+                head.copy_from_slice(&crate::now_us().to_be_bytes());
+                write_msg2(&mut sock, MSG_TICK, &head, &[]).await?;
+            }
             m = rx.recv() => match m {
                 Ok(VideoMsg::Config(c)) => write_msg(&mut sock, MSG_CONFIG, &c).await?,
                 Ok(VideoMsg::Frame { pts_us, key, send_us, data }) => {
@@ -71,6 +79,17 @@ async fn handle(
                     head[8] = key as u8;
                     head[9..17].copy_from_slice(&send_us.to_be_bytes());
                     write_msg2(&mut sock, MSG_FRAME, &head, &data).await?;
+                    // 桥内排队 + TCP 写入耗时（不含 adb/USB 与平板侧），用于给延时拆段。
+                    static SUM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let d = crate::now_us().saturating_sub(send_us);
+                    let s1 = SUM.fetch_add(d, std::sync::atomic::Ordering::Relaxed) + d;
+                    let n1 = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if n1 % 120 == 0 {
+                        eprintln!("[video] 桥内排队+写入 {:.1} ms（n={n1}）", s1 as f64 / n1 as f64 / 1000.0);
+                        SUM.store(0, std::sync::atomic::Ordering::Relaxed);
+                        N.store(0, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     eprintln!("[video] client lagged {n} frames");
@@ -79,8 +98,9 @@ async fn handle(
             },
             a = arx.recv() => match a {
                 Ok(pkt) if audio_enabled => {
+                    // 头 8 字节放发送时刻（平板用它量小包传输延时；音频不需要 pts）
                     let mut head = [0u8; 8];
-                    head.copy_from_slice(&pkt.pts_us.to_be_bytes());
+                    head.copy_from_slice(&crate::now_us().to_be_bytes());
                     write_msg2(&mut sock, MSG_AUDIO, &head, &pkt.pcm).await?;
                 }
                 Ok(_) => {}

@@ -102,7 +102,12 @@ async fn handle(sock: TcpStream, tx: mpsc::Sender<TouchEvent>, aspect: f32) -> R
             }
             None => {
                 let t = line.trim();
-                if t == "p" {
+                if t == "h" {
+                    // 单向心跳：平板用 收到时间 - 该时刻 判断单程延时（不需要往返）
+                    let _ = wr
+                        .write_all(format!("#hb {}\n", crate::now_us()).as_bytes())
+                        .await;
+                } else if t == "p" {
                     // 时钟校准：平板发来 p，回 bridge 当前单调微秒。
                     let _ = wr
                         .write_all(format!("#pong {}\n", crate::now_us()).as_bytes())

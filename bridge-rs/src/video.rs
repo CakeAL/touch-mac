@@ -233,7 +233,20 @@ fn emit(f: Frame, mut data: BytesMut, n: u64, tx: &broadcast::Sender<VideoMsg>, 
         }
         if now > t0 + 2_000_000 {
             let fps = (c as f64) * 1_000_000.0 / ((now - t0) as f64);
-            eprintln!("[video] 入帧帧率 {fps:.1} fps（{c} 帧 / {:.2}s）", (now - t0) as f64 / 1e6);
+            // 采集→到达：pts 是刻进码流的捕获时间（90kHz），与单调时钟的差值即为
+            // Sunshine 抓屏 + 编码 + UDP 回环的总耗时（用首帧做基线消掉未知起点）。
+            static BASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let diff = now.saturating_sub(pts_us);
+            let mut base = BASE.load(std::sync::atomic::Ordering::Relaxed);
+            if base == 0 {
+                BASE.store(diff, std::sync::atomic::Ordering::Relaxed);
+                base = diff;
+            }
+            let enc_ms = diff.saturating_sub(base) as f64 / 1000.0;
+            eprintln!(
+                "[video] 入帧帧率 {fps:.1} fps（{c} 帧 / {:.2}s）  采集→到达 ~{enc_ms:.1} ms",
+                (now - t0) as f64 / 1e6
+            );
             CNT.store(0, std::sync::atomic::Ordering::Relaxed);
             T0.store(now, std::sync::atomic::Ordering::Relaxed);
         }

@@ -257,3 +257,23 @@ Sunshine 的二进制与签名均未改动（`codesign --verify --deep --strict`
   改回 `0`（Rec.601 limited）后颜色正常。可用 `CSC=2` 环境变量复现。
 - 桥的重启（设置界面 `apply`）会断开触控连接：App 的读线程原来只在写失败时才重连，
   现在读线程 EOF 时主动 `closeQuietly()`，写线程随即退出并 400 ms 后重连 → 自动恢复会话。
+
+## 11. 延时拆段与真正的瓶颈（2026-11-13 20:2x）
+
+分段埋点（App 侧 `lat:`，桥侧 `桥内排队+写入`，触摸口 `#hb` 单向心跳）：
+
+| 段 | 实测 | 说明 |
+|---|---|---|
+| 桥内（组装→写 TCP） | 0.0 ms | 可忽略 |
+| adb reverse 单向 | **14–15 ms** | 只下行、无上行的 socket 被 adbd 攒包 |
+| 解码 + 合成 | 8.7–10 ms | 解码 ~4 ms + vsync 等待 |
+| 合计 send→render | 28–31 ms | |
+
+**根因**：app 到平板的视频 socket 基本是单向下行，adbd 会按批 flush，小包要多等十几毫秒。
+验证：让 app 在这条 socket 上周期性回写 1 字节（`video-keepalive`），
+- 20 ms 间隔：net 17.5 → 12 ms
+- **5 ms 间隔：net 17.5 → 3.5 ms**（`tick one-way` 也从 21 ms 掉到 1.9 ms）
+
+最终：`net 3.5–4.2 ms / decode+compose 8.7 ms / total ~13 ms`，状态行 `delay 11–13 ms`（此前 20 ms+）。
+其余改动：`FRAME_QUEUE` 12→6、`KEY_PRIORITY=0`、`KEY_OPERATING_RATE=120`、收流线程 `THREAD_PRIORITY_URGENT_AUDIO`；
+时钟校准改为 `elapsedRealtimeNanos` 真往返 + 中点估计（原来 recv 时间取错，偏移偏大约一个单程）。

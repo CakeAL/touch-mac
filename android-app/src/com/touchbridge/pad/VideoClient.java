@@ -44,8 +44,9 @@ public final class VideoClient {
     /** 单条消息上限，防止坏长度把内存吃穿。 */
     private static final int MAX_MESSAGE = 16 * 1024 * 1024;
     /** 待解码帧数上限：一帧 100KB 级，12 帧 ≈ 1.2MB，够吸收抖动又不会积压成延迟。 */
-    private static final int FRAME_QUEUE = 12;
+    private static final int FRAME_QUEUE = 6;
     private static final int RECONNECT_MS = 400;
+    private static final int TYPE_TICK = 0x04;
 
     interface StateListener {
         void onState(String text);
@@ -67,6 +68,16 @@ public final class VideoClient {
     private String appliedMime = "video/avc";
     private volatile AudioPlayer audio;
     private final java.util.ArrayDeque<Long> inflightSendUs = new java.util.ArrayDeque<>();
+    private final java.util.ArrayDeque<Long> inflightFeedUs = new java.util.ArrayDeque<>();
+    /** 桥的单调时钟（微秒），用于算网络/解码/合成各段延时。 */
+    private volatile java.util.function.LongSupplier bridgeClock;
+    private long statRecvSum, statRecvN, statTotSum, statTotN, statDecSum, statDecN;
+    private long audioNetSum, audioNetN;
+    private int tickN;
+
+    void setBridgeClock(java.util.function.LongSupplier c) {
+        bridgeClock = c;
+    }
 
     /** 每渲染一帧回调一次，参数是 bridge 侧发出该帧的单调微秒。 */
     interface RenderListener {
@@ -189,6 +200,21 @@ public final class VideoClient {
                 s.connect(new InetSocketAddress(HOST, PORT), 1500);
                 socket = s;
                 connected = true;
+                // 反向保活：adbd 对“只下行”的 socket 会攒包，周期性上行一个字节可以让它尽快 flush
+                final java.io.OutputStream keep = s.getOutputStream();
+                Thread kt = new Thread(() -> {
+                    while (running && !s.isClosed()) {
+                        try {
+                            keep.write('k');
+                            keep.flush();
+                            Thread.sleep(5);
+                        } catch (Exception e) {
+                            return;
+                        }
+                    }
+                }, "video-keepalive");
+                kt.setDaemon(true);
+                kt.start();
                 Log.i(TAG, "video connected to " + HOST + ":" + PORT);
                 setNetState("connected");
                 DataInputStream in = new DataInputStream(
@@ -220,6 +246,11 @@ public final class VideoClient {
 
     /** 按协议逐条读消息；大消息用 readFully 整块读。 */
     private void readLoop(DataInputStream in) throws IOException {
+        // 收流线程提到高优先级：低优先级时读 socket 会被解码线程抢占，实测能多出十几毫秒
+        try {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO);
+        } catch (Exception ignore) {
+        }
         while (running) {
             int type = in.readUnsignedByte();
             long len = ((long) in.readUnsignedByte() << 24)
@@ -235,6 +266,19 @@ public final class VideoClient {
                 onConfig(payload);
             } else if (type == TYPE_FRAME) {
                 onFramePayload(payload);
+            } else if (type == TYPE_TICK) {
+                if (payload.length >= 8) {
+                    long send = 0;
+                    for (int i = 0; i < 8; i++) send = (send << 8) | (payload[i] & 0xffL);
+                    java.util.function.LongSupplier ck = bridgeClock;
+                    long now = ck == null ? 0 : ck.getAsLong();
+                    if (now > 0) {
+                        long d = now - send;
+                        if (d > -1_000_000L && d < 1_000_000L && (++tickN % 20) == 1) {
+                            Log.i(TAG, String.format(java.util.Locale.US, "tick one-way %.2f ms", d / 1000.0));
+                        }
+                    }
+                }
             } else if (type == TYPE_AUDIO) {
                 onAudioPayload(payload);
             } else {
@@ -249,6 +293,20 @@ public final class VideoClient {
         for (int i = 0; i < 8; i++) {
             pts = (pts << 8) | (payload[i] & 0xffL);
         }
+        java.util.function.LongSupplier ck = bridgeClock;
+        long nowUs = ck == null ? 0 : ck.getAsLong();
+        if (nowUs > 0) {
+            long d = nowUs - pts;
+            if (d > 0 && d < 5_000_000L) {
+                audioNetSum += d;
+                if (++audioNetN >= 360) {
+                    Log.i(TAG, String.format(java.util.Locale.US,
+                            "audio net %.1f ms (n=%d)", audioNetSum / 1000.0 / audioNetN, audioNetN));
+                    audioNetSum = 0;
+                    audioNetN = 0;
+                }
+            }
+        }
         byte[] pcm = new byte[payload.length - 8];
         System.arraycopy(payload, 8, pcm, 0, pcm.length);
         AudioPlayer a = audio;
@@ -262,6 +320,10 @@ public final class VideoClient {
             }
         }
         a.feed(pcm);
+    }
+
+    void setMuted(boolean muted) {
+        setAudioEnabled(!muted);
     }
 
     void setAudioEnabled(boolean on) {
@@ -320,6 +382,16 @@ public final class VideoClient {
 
         byte[] au = new byte[payload.length - 17];
         System.arraycopy(payload, 17, au, 0, au.length);
+
+        java.util.function.LongSupplier ck = bridgeClock;
+        long nowUs = ck == null ? 0 : ck.getAsLong();
+        if (nowUs > 0 && sendUs > 0) {
+            long d = nowUs - sendUs;
+            if (d > 0 && d < 5_000_000L) {
+                statRecvSum += d;
+                statRecvN++;
+            }
+        }
 
         if (surface == null || csd == null) {
             // surface 还没就绪（例如退到后台）：直接丢帧，别把队列灌满
@@ -414,6 +486,15 @@ public final class VideoClient {
                     Log.i(TAG, "video: decoder refused low-latency flag");
                 }
             }
+            // 实时优先 + 声明操作帧率，避免解码器按省电策略攒帧
+            try {
+                fmt.setInteger(MediaFormat.KEY_PRIORITY, 0);
+            } catch (Exception ignore) {
+            }
+            try {
+                fmt.setInteger(MediaFormat.KEY_OPERATING_RATE, 120);
+            } catch (Exception ignore) {
+            }
             c.configure(fmt, surf, null, 0);
             c.start();
         } catch (Exception e) {
@@ -438,6 +519,7 @@ public final class VideoClient {
         wantResync = false;
         frames.clear();          // 新 codec 只能从 IDR 开始喂
         inflightSendUs.clear();
+        inflightFeedUs.clear();
         Log.i(TAG, "video codec started " + c.getName() + " " + w + "x" + h
                 + " low-latency=" + (Build.VERSION.SDK_INT >= 30 ? 1 : 0));
         setDecState("decoding " + w + "x" + h);
@@ -493,6 +575,7 @@ public final class VideoClient {
                 try {
                     c.queueInputBuffer(in, 0, f.data.length, f.ptsUs, 0);
                     inflightSendUs.addLast(f.sendUs);
+                    inflightFeedUs.addLast(SystemClock.elapsedRealtime() * 1000L);
                     if (inflightSendUs.size() > 64) inflightSendUs.pollFirst();
                 } catch (IllegalStateException ise) {
                     Log.w(TAG, "video queueInputBuffer failed: " + ise);
@@ -556,8 +639,33 @@ public final class VideoClient {
             }
             if (render) {
                 Long sent = inflightSendUs.pollFirst();
+                Long fed = inflightFeedUs.pollFirst();
                 RenderListener l = renderListener;
                 if (sent != null && l != null) l.onRendered(sent);
+                java.util.function.LongSupplier ck2 = bridgeClock;
+                long now2 = ck2 == null ? 0 : ck2.getAsLong();
+                if (now2 > 0 && sent != null) {
+                    long tot = now2 - sent;
+                    if (tot > 0 && tot < 5_000_000L) {
+                        statTotSum += tot;
+                        statTotN++;
+                    }
+                    if (fed != null) {
+                        long dec = SystemClock.elapsedRealtime() * 1000L - fed;
+                        if (dec > 0 && dec < 5_000_000L) {
+                            statDecSum += dec;
+                            statDecN++;
+                        }
+                    }
+                    if (statTotN >= 120) {
+                        Log.i(TAG, String.format(java.util.Locale.US,
+                                "lat: net %.1fms decode+compose %.1fms total %.1fms (n=%d)",
+                                statRecvN == 0 ? 0.0 : statRecvSum / 1000.0 / statRecvN,
+                                statDecN == 0 ? 0.0 : statDecSum / 1000.0 / statDecN,
+                                statTotSum / 1000.0 / statTotN, statTotN));
+                        statRecvSum = statRecvN = statTotSum = statTotN = statDecSum = statDecN = 0;
+                    }
+                }
                 lastFrameAt = SystemClock.elapsedRealtime();
                 if (!gotFrame) {
                     gotFrame = true;

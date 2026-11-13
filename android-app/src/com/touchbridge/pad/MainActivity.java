@@ -19,6 +19,8 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
+import android.widget.TextView;
+import android.util.TypedValue;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -60,6 +62,8 @@ public class MainActivity extends Activity {
     private Link link;
     private boolean requested120;
     private VideoClient video;
+    private SettingsPanel settings;
+    private TextView gear;
 
     /** 选一个最高刷新率的显示模式：默认 60 Hz 时每帧要多等一个 vsync。 */
     private void requestHighRefresh() {
@@ -94,6 +98,7 @@ public class MainActivity extends Activity {
 
         link = new Link();
         video = new VideoClient();
+        video.setBridgeClock(() -> link.bridgeNowUs());
         video.setStateListener(s -> {
             TouchSurface t = touch;
             if (t != null) t.postInvalidateOnAnimation();
@@ -137,6 +142,28 @@ public class MainActivity extends Activity {
             touch.post(() -> applyVideoRect(r));
         });
 
+        settings = new SettingsPanel(this, root, video, touch);
+        gear = new TextView(this);
+        gear.setText("⚙");
+        gear.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        gear.setTextColor(Color.WHITE);
+        gear.setGravity(Gravity.CENTER);
+        gear.setBackground(disc(0x99101216));
+        FrameLayout.LayoutParams gp = new FrameLayout.LayoutParams(dp(52), dp(52));
+        gp.gravity = Gravity.TOP | Gravity.END;
+        gp.topMargin = dp(14);
+        gp.rightMargin = dp(14);
+        gear.setOnClickListener(v -> {
+            settings.toggle();
+            hideSystemBars();
+        });
+        root.addView(gear, gp);
+
+        // 本地开关（延时显示 / 静音）在启动时按上次的选择恢复
+        android.content.SharedPreferences prefs = getSharedPreferences("touchbridge", MODE_PRIVATE);
+        touch.setShowDelay(prefs.getBoolean("showDelay", true));
+        video.setMuted(prefs.getBoolean("muteAudio", false));
+
         setContentView(root);
         link.start();
         video.setRenderListener(sendUs -> {
@@ -176,6 +203,17 @@ public class MainActivity extends Activity {
         if (hasFocus) hideSystemBars();
     }
 
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+
+    private android.graphics.drawable.GradientDrawable disc(int color) {
+        android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+        g.setColor(color);
+        g.setCornerRadius(dp(26));
+        return g;
+    }
+
     private void hideSystemBars() {
         getWindow().getDecorView().setSystemUiVisibility(
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
@@ -204,6 +242,7 @@ public class MainActivity extends Activity {
         private AreaListener areaListener;
         /** 最近一帧的端到端延时（bridge 发出 → 平板渲染），毫秒；-1 表示还没测出来。 */
         private volatile long latencyMs = -1;
+        private volatile boolean showDelay = true;
 
         private final Paint dot = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -333,12 +372,18 @@ public class MainActivity extends Activity {
             if (active.size() > 0 || !playing) postInvalidateOnAnimation();
         }
 
+        void setShowDelay(boolean on) {
+            showDelay = on;
+            postInvalidateOnAnimation();
+        }
+
         void setLatency(long ms) {
             latencyMs = ms;
             postInvalidateOnAnimation();
         }
 
         private String latencyLabel() {
+            if (!showDelay) return "";
             long ms = latencyMs;
             if (ms < 0 || link.bridgeNowUs() == Long.MIN_VALUE) return "delay --";
             return String.format(Locale.US, "delay %d ms", ms);
@@ -430,6 +475,9 @@ public class MainActivity extends Activity {
         /** bridge 单调时钟（微秒）与本地 SystemClock.elapsedRealtime 的差；用于算端到端延时。 */
         private volatile long offsetUs = Long.MIN_VALUE;
         private volatile long clockRttUs;
+        private volatile long clockSendNs;
+        private int hbCount;
+        private int pongCount;
 
         long bridgeNowUs() {
             long off = offsetUs;
@@ -499,23 +547,25 @@ public class MainActivity extends Activity {
          * 用 #t0 / #pong 估 bridge 时钟：bridge 的 now_us(启动起算) 与本地 elapsedRealtime 同速，
          * 只差一个固定偏移。收到 #pong 时用往返中点修正，误差约为单程抖动的一半。
          */
-        private void noteServerClock(String usText, long sendMs, long recvMs, long sendUs) {
+        private void noteServerClock(String usText, long sendNs) {
             long serverUs;
             try {
                 serverUs = Long.parseLong(usText);
             } catch (NumberFormatException e) {
                 return;
             }
-            long localUs = SystemClock.elapsedRealtime() * 1000L;
-            if (sendMs < 0) {
+            long localUs = SystemClock.elapsedRealtimeNanos() / 1000L;
+            if (sendNs <= 0) {
                 // 首帧 #t0：直接取一次粗偏移，后续 #pong 会收敛
                 offsetUs = serverUs - localUs;
                 return;
             }
-            long rtt = (recvMs - sendMs) * 1000L;
+            long rtt = (localUs - sendNs / 1000L);
             if (rtt < 0 || rtt > 1_000_000L) return;   // 异常值丢弃
             clockRttUs = rtt;
-            long midLocalUs = (sendMs + recvMs) * 500L;
+            if ((++pongCount % 10) == 1) Log.i(TAG, "clock rtt " + (rtt / 1000.0) + " ms");
+            // 中点估计：服务端时间对应的是本机 send 与 recv 之间某个时刻
+            long midLocalUs = sendNs / 1000L + rtt / 2;
             offsetUs = serverUs - midLocalUs;
         }
 
@@ -528,12 +578,17 @@ public class MainActivity extends Activity {
                         break;
                     }
                     if (out == null) continue;
+                    try {
+                        out.write("h\n".getBytes(StandardCharsets.US_ASCII));
+                        out.flush();
+                    } catch (Exception ignore) {
+                    }
                     clockSendMs = SystemClock.elapsedRealtime();
                     clockSendUs = clockSendMs * 1000L;
+                    clockSendNs = SystemClock.elapsedRealtimeNanos();
                     try {
                         out.write("p\n".getBytes(StandardCharsets.US_ASCII));
                         out.flush();
-                        clockRecvMs = SystemClock.elapsedRealtime();
                     } catch (Exception ignore) {
                     }
                 }
@@ -551,9 +606,19 @@ public class MainActivity extends Activity {
                     while (running && (line = br.readLine()) != null) {
                         line = line.trim();
                         if (line.startsWith("#t0 ")) {
-                            noteServerClock(line.substring(4).trim(), -1, -1, -1);
+                            noteServerClock(line.substring(4).trim(), 0);
+                        } else if (line.startsWith("#hb ")) {
+                            try {
+                                long serverUs = Long.parseLong(line.substring(4).trim());
+                                long d = bridgeNowUs() - serverUs;
+                                if (d > -1_000_000L && d < 1_000_000L
+                                        && (++hbCount % 5) == 1) {
+                                    Log.i(TAG, "one-way " + (d / 1000.0) + " ms");
+                                }
+                            } catch (NumberFormatException ignore) {
+                            }
                         } else if (line.startsWith("#pong ")) {
-                            noteServerClock(line.substring(6).trim(), clockSendMs, clockRecvMs, clockSendUs);
+                            noteServerClock(line.substring(6).trim(), clockSendNs);
                         } else if (line.startsWith("#aspect ")) {
                             try {
                                 float a = Float.parseFloat(line.substring(8).trim());
