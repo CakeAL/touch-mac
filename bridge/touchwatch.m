@@ -75,7 +75,8 @@ static void L(NSString *fmt, ...) {
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
     NSRect f = NSScreen.mainScreen.frame;
     TWWindow *w = [[TWWindow alloc] initWithContentRect:f styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
-    w.level = NSMainMenuWindowLevel + 1;
+    const char *lvl = getenv("TW_LEVEL");
+    w.level = lvl ? atol(lvl) : (NSMainMenuWindowLevel + 1);
     w.backgroundColor = [NSColor colorWithCalibratedWhite:0.1 alpha:1.0];
     TV *v = [[TV alloc] initWithFrame:f];
     w.contentView = v;

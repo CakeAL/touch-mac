@@ -5,32 +5,39 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.RectF;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.util.SparseArray;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
-import android.widget.TextView;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * 平板侧触控转发应用。
  *
- * 通过 adb reverse tcp:7000 tcp:7000 把平板 localhost:7000 转发到 Mac 上的 bridge/touchd.py，
+ * 通过 adb reverse tcp:47777 tcp:47777 把平板 localhost:47777 转发到 Mac 上的 bridge/touchd.py，
  * 用最朴素的文本行协议发送多点触控：
  *   d <id> <x> <y>   按下
  *   m <id> <x> <y>   移动
  *   u <id> <x> <y>   抬起
  *   c                取消全部
- * 坐标归一化到 0..1，原点在左下角（与 Moonlight/Sunshine 的触控语义一致）。
+ * 坐标归一化到 0..1，原点在左上角（Sunshine 直接把它写成 HID digitizer 坐标）。
+ *
+ * 屏幕中间会画一个和 Mac 显示器同宽高比的活动框（由 touchd 通过 "#aspect <ratio>" 下发），
+ * 框外的触摸不转发，框内坐标线性映射到 Mac 全屏，这样手感和真实触摸屏一致。
  */
 public class MainActivity extends Activity {
     static final String TAG = "TouchBridge";
@@ -47,6 +54,7 @@ public class MainActivity extends Activity {
 
         link = new Link();
         surface = new TouchSurface(this, link);
+        link.surface = surface;
         setContentView(surface);
         link.start();
 
@@ -75,14 +83,30 @@ public class MainActivity extends Activity {
         super.onDestroy();
     }
 
-    /** 触控面板：绘制触点反馈 + 上报事件。 */
+    /** 触控面板：绘制活动框与触点反馈，并按活动框映射坐标。 */
     static class TouchSurface extends View {
-        private final Link link;
+        private static final float[] ASPECTS = {16f / 9f, 16f / 10f, 4f / 3f, 0f};
+        private static final String[] ASPECT_LABELS = {"16:9", "16:10", "4:3", "满屏"};
+
+        private Link link;
         private final Paint dot = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint hint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint bg = new Paint();
+        private final Paint outside = new Paint();
+        private final Paint frame = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final SparseArray<float[]> active = new SparseArray<>();
+        private final Set<Integer> ignored = new HashSet<>();
+
+        private final RectF area = new RectF();
+        private float targetAspect = ASPECTS[0];
+        private int aspectIndex = 0;
+        private boolean aspectFromHost = false;
+
+        private final Handler handler = new Handler(Looper.getMainLooper());
+        private float downX, downY;
+        private boolean longFired;
 
         TouchSurface(Context c, Link link) {
             super(c);
@@ -91,39 +115,107 @@ public class MainActivity extends Activity {
             ring.setColor(Color.parseColor("#80FFFFFF"));
             ring.setStyle(Paint.Style.STROKE);
             ring.setStrokeWidth(3f);
-            text.setColor(Color.parseColor("#99FFFFFF"));
-            text.setTextSize(36f);
+            text.setColor(Color.parseColor("#CCFFFFFF"));
+            text.setTextSize(34f);
+            hint.setColor(Color.parseColor("#66FFFFFF"));
+            hint.setTextSize(28f);
             bg.setColor(Color.BLACK);
+            outside.setColor(Color.parseColor("#121212"));
+            frame.setStyle(Paint.Style.STROKE);
+            frame.setStrokeWidth(3f);
+            frame.setColor(Color.parseColor("#55FFFFFF"));
             setKeepScreenOn(true);
+        }
+
+        /** touchd 下发的目标宽高比（Mac 显示器）。 */
+        void setAspect(float a) {
+            if (a < 0.2f || a > 6f) return;
+            targetAspect = a;
+            aspectFromHost = true;
+            recomputeArea();
+            postInvalidateOnAnimation();
+            Log.i(TAG, "aspect from host: " + a);
+        }
+
+        @Override
+        protected void onSizeChanged(int w, int h, int ow, int oh) {
+            super.onSizeChanged(w, h, ow, oh);
+            recomputeArea();
+        }
+
+        private void recomputeArea() {
+            int w = Math.max(1, getWidth()), h = Math.max(1, getHeight());
+            if (targetAspect <= 0f) {
+                area.set(0, 0, w, h);
+                return;
+            }
+            float fw = w, fh = fw / targetAspect;
+            if (fh > h) {
+                fh = h;
+                fw = fh * targetAspect;
+            }
+            float left = (w - fw) / 2f, top = (h - fh) / 2f;
+            area.set(left, top, left + fw, top + fh);
         }
 
         @Override
         protected void onDraw(Canvas canvas) {
             int w = getWidth(), h = getHeight();
             canvas.drawRect(0, 0, w, h, bg);
+            if (area.left > 0.5f || area.top > 0.5f
+                    || area.right < w - 0.5f || area.bottom < h - 0.5f) {
+                canvas.drawRect(0, 0, w, area.top, outside);
+                canvas.drawRect(0, area.bottom, w, h, outside);
+                canvas.drawRect(0, area.top, area.left, area.bottom, outside);
+                canvas.drawRect(area.right, area.top, w, area.bottom, outside);
+            }
+            canvas.drawRect(area, frame);
+
             for (int i = 0; i < active.size(); i++) {
                 float[] p = active.valueAt(i);
-                float cx = p[0] * w, cy = (1f - p[1]) * h;
-                canvas.drawCircle(cx, cy, 70f, ring);
-                canvas.drawCircle(cx, cy, 26f, dot);
+                float cx = area.left + p[0] * area.width();
+                float cy = area.top + p[1] * area.height();
+                canvas.drawCircle(cx, cy, 60f, ring);
+                canvas.drawCircle(cx, cy, 24f, dot);
             }
-            canvas.drawText(link.statusText(), 40f, 60f, text);
-            canvas.drawText(String.format(Locale.US, "touching: %d", active.size()),
-                    40f, 110f, text);
+
+            float tx = area.left + 36f, ty = area.top + 56f;
+            canvas.drawText(link.statusText(), tx, ty, text);
+            canvas.drawText(String.format(Locale.US, "touching: %d   frame: %s",
+                    active.size(), aspectLabel()), tx, ty + 44f, text);
+            canvas.drawText("长按切换比例 · 只有框内区域会转发触摸",
+                    tx, ty + 88f, hint);
             if (active.size() > 0) postInvalidateOnAnimation();
+        }
+
+        private String aspectLabel() {
+            if (targetAspect <= 0f) return "满屏";
+            if (aspectFromHost) return String.format(Locale.US, "%.3f (host)", targetAspect);
+            return ASPECT_LABELS[aspectIndex];
         }
 
         @Override
         public boolean onTouchEvent(MotionEvent e) {
             final int action = e.getActionMasked();
             switch (action) {
-                case MotionEvent.ACTION_DOWN:
+                case MotionEvent.ACTION_DOWN: {
+                    downX = e.getX();
+                    downY = e.getY();
+                    longFired = false;
+                    handler.postDelayed(longPress, 700);
+                    emit('d', e.getPointerId(0), downX, downY);
+                    break;
+                }
                 case MotionEvent.ACTION_POINTER_DOWN: {
                     int i = e.getActionIndex();
                     emit('d', e.getPointerId(i), e.getX(i), e.getY(i));
                     break;
                 }
                 case MotionEvent.ACTION_MOVE: {
+                    if (!longFired) {
+                        float dx = e.getX() - downX, dy = e.getY() - downY;
+                        if (dx * dx + dy * dy > 40f * 40f) handler.removeCallbacks(longPress);
+                    }
                     for (int i = 0; i < e.getPointerCount(); i++) {
                         emit('m', e.getPointerId(i), e.getX(i), e.getY(i));
                     }
@@ -144,16 +236,48 @@ public class MainActivity extends Activity {
                 default:
                     break;
             }
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                handler.removeCallbacks(longPress);
+            }
             invalidate();
             return true;
         }
 
+        private final Runnable longPress = new Runnable() {
+            @Override
+            public void run() {
+                longFired = true;
+                link.send('c', 0, 0f, 0f);
+                active.clear();
+                ignored.clear();
+                aspectFromHost = false;
+                aspectIndex = (aspectIndex + 1) % ASPECTS.length;
+                targetAspect = ASPECTS[aspectIndex];
+                recomputeArea();
+                Log.i(TAG, "aspect cycled to " + ASPECT_LABELS[aspectIndex]);
+                postInvalidateOnAnimation();
+            }
+        };
+
         private void emit(char kind, int id, float px, float py) {
-            int w = Math.max(1, getWidth()), h = Math.max(1, getHeight());
-            float nx = clamp(px / w);
-            float ny = 1f - clamp(py / h);
+            if (area.width() <= 0f || area.height() <= 0f) return;
+
+            if (kind == 'd') {
+                if (!area.contains(px, py)) {
+                    ignored.add(id);
+                    Log.i(TAG, "ignore down outside frame id=" + id);
+                    return;
+                }
+            } else if (ignored.contains(id)) {
+                if (kind == 'u') ignored.remove(id);
+                return;
+            }
+
+            float nx = clamp((px - area.left) / area.width());
+            float ny = clamp((py - area.top) / area.height());
             if (kind == 'u') active.remove(id);
             else active.put(id, new float[]{nx, ny});
+
             if (kind != 'm') Log.i(TAG, "emit " + kind + " id=" + id + " " + nx + "," + ny);
             link.send(kind, id, nx, ny);
             if (kind == 'u' && active.size() == 0) link.send('c', 0, 0f, 0f);
@@ -173,6 +297,7 @@ public class MainActivity extends Activity {
         private volatile OutputStream out;
         private volatile boolean running = true;
         private volatile String state = "connecting...";
+        volatile TouchSurface surface;
 
         String statusText() {
             return "adb reverse tcp:" + PORT + " · " + state;
@@ -191,6 +316,7 @@ public class MainActivity extends Activity {
                     state = "connected";
                     Log.i(TAG, "link connected to " + HOST + ":" + PORT);
                     queue.clear();
+                    startReader(s);
 
                     while (running && out != null) {
                         String line = queue.poll(500, java.util.concurrent.TimeUnit.MILLISECONDS);
@@ -220,6 +346,31 @@ public class MainActivity extends Activity {
                 }
             }
             state = "stopped";
+        }
+
+        /** 读 touchd 下发的握手行，例如 "#aspect 1.777778"。 */
+        private void startReader(Socket s) {
+            Thread t = new Thread(() -> {
+                try (BufferedReader br = new BufferedReader(
+                        new InputStreamReader(s.getInputStream(), StandardCharsets.US_ASCII))) {
+                    String line;
+                    while (running && (line = br.readLine()) != null) {
+                        line = line.trim();
+                        if (line.startsWith("#aspect ")) {
+                            try {
+                                float a = Float.parseFloat(line.substring(8).trim());
+                                TouchSurface sf = surface;
+                                if (sf != null) sf.post(() -> sf.setAspect(a));
+                            } catch (NumberFormatException ignore) {
+                                Log.w(TAG, "bad aspect line: " + line);
+                            }
+                        }
+                    }
+                } catch (Exception ignore) {
+                }
+            }, "touch-reader");
+            t.setDaemon(true);
+            t.start();
         }
 
         void send(char kind, int id, float x, float y) {

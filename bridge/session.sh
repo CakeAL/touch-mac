@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 建立一次 Sunshine 会话，把平板触摸转发成 VoidLink 原生触控。
 #
-# 用法: ./session.sh [--appid N] [--no-tablet] [--net] [--port N]
+# 用法: ./session.sh [--appid N] [--no-tablet] [--net] [--port N] [--aspect 16:9]
 #                    [--rotate 0|90|180|270] [--device /dev/input/event3] [--maxx N] [--maxy N]
 #
 # 平板触控有两种接入方式：
@@ -21,6 +21,7 @@ PIDFILE=/tmp/touchbridge.pids
 ADB="${ADB:-adb}"
 
 APPID=881448767
+ASPECT="${ASPECT:-}"
 TABLET=1
 NET=0
 PORT=47777
@@ -31,6 +32,7 @@ MAXY=2799
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --appid) APPID="$2"; shift 2 ;;
+    --aspect) ASPECT="$2"; shift 2 ;;
     --no-tablet) TABLET=0; shift ;;
     --net) NET=1; shift ;;
     --port) PORT="$2"; shift 2 ;;
@@ -41,6 +43,13 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+# Mac 主显示器的宽高比（平板端按这个比例画活动框）
+if [[ -z "$ASPECT" ]]; then
+  ASPECT="$(system_profiler SPDisplaysDataType 2>/dev/null \
+    | awk '/UI Looks like: [0-9]+ x [0-9]+/ {print $4":"$6; exit}')"
+fi
+[[ -z "$ASPECT" ]] && ASPECT="16:9"
 
 cleanup() {
   [[ -f "$PIDFILE" ]] && while read -r p; do kill "$p" 2>/dev/null; done < "$PIDFILE"
@@ -80,9 +89,10 @@ if [[ "$TABLET" == "1" ]]; then
   if [[ "$NET" == "1" ]]; then
     "$ADB" reverse "tcp:$PORT" "tcp:$PORT" >/dev/null 2>&1 \
       || echo "[session] adb reverse 失败，请确认平板已连接并授权" >&2
-    python3 "$HERE/touchd.py" --port "$PORT" --fifo "$FIFO" >/tmp/touchbridge-touchd.log 2>&1 &
+    python3 "$HERE/touchd.py" --port "$PORT" --fifo "$FIFO" --aspect "$ASPECT" \
+        >/tmp/touchbridge-touchd.log 2>&1 &
     echo $! >> "$PIDFILE"
-    echo "[session] 平板 App: adb reverse tcp:$PORT 已建立，打开 TouchBridge 即可" >&2
+    echo "[session] 平板 App: adb reverse tcp:$PORT 已建立（目标宽高比 ${ASPECT}），打开 TouchBridge 即可" >&2
   else
     python3 "$HERE/tablet_touch.py" --adb "$ADB" --device "$DEVICE" \
         --maxx "$MAXX" --maxy "$MAXY" --rotate "$ROTATE" --out "$FIFO" >/tmp/touchbridge-tablet.log 2>&1 &

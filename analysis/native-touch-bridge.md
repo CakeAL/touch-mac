@@ -172,8 +172,18 @@ WindowServer: BKDirectTouchState → contacts → 应用指针事件
 - 平板 App 的 socket 写必须在独立线程：`onTouchEvent` 在主线程，
   直接写 socket 会抛 `NetworkOnMainThreadException`（第一版实现踩过，表现为
   “连上即断 + write failed”）。
-- 坐标：平板 `x / width`、`1 - y / height`；实测映射精确（`input tap 900 900`
-  → Mac `loc=617,555`，与 1920×1080 全屏窗口一致）。
+- 坐标（曾出错，已修正）：协议 y 的原点是**左上角**，Sunshine 直接写入 HID digitizer，
+  WindowServer 再转成 AppKit 的左下原点（实测 `AppKit.y = (1 - y) * H`）。第一版多翻了
+  一次 y，导致“平板顶部 → Mac 底部”上下颠倒；实测 `input tap 1400 200`（平板顶部）
+  在颠倒版本里落在 `loc=123.5`，修正后为 `loc=1003.5`。
+- 活动框：`session.sh` 用 `system_profiler SPDisplaysDataType` 的 `UI Looks like: 1920 x 1080`
+  得到 Mac 主显示器比例，`touchd.py` 在连接建立时下发 `#aspect 1.777778`；App 据此在
+  屏幕上画居中的 16:9 框，**框外触摸不转发**、框内坐标线性映射到 Mac 全屏，两者比例
+  不同时也不会拉歪。长按 700 ms 可在 16:9 / 16:10 / 4:3 / 满屏间切换。
+- 修正后的四角实测（2800×1752 画布，活动框 2800×1575，上下各留 88.5 px）：
+  `tap 1400 200 → loc=960,1003.5`、`tap 1400 1600 → loc=960,43.5`、
+  `tap 200 800 → loc=137,592`、`tap 2600 800 → loc=1783,592`；`tap 1400 30`
+  （框外）完全不产生指针事件。
 
 已用 `adb shell input tap/swipe` 端到端验证（不经人手）：
 `touchd` 统计 `d=3 m=118 u=3`，应用收到 3 组 MOUSEDOWN→MOUSEDRAG→MOUSEUP，

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import errno
 import os
 import socket
@@ -20,6 +21,25 @@ import time
 
 FIFO_WAIT_MSG = "waiting for bridge client on FIFO"
 _ACTIVE = 0
+DEFAULT_ASPECT = 16.0 / 9.0
+
+
+def parse_aspect(text: str) -> float:
+    """接受 "16:9"、"16x9" 或纯浮点。"""
+    text = (text or "").strip()
+    if not text:
+        return DEFAULT_ASPECT
+    try:
+        if ":" in text:
+            a, b = text.split(":", 1)
+            return float(a) / float(b)
+        if "x" in text.lower():
+            a, b = re.split("[xX]", text, maxsplit=1)
+            return float(a) / float(b)
+        return float(text)
+    except (ValueError, ZeroDivisionError):
+        log("bad aspect, falling back to 16:9:", text)
+        return DEFAULT_ASPECT
 
 
 def log(*args):
@@ -91,11 +111,16 @@ def parse(line: str):
     return (kind, ident, x, y)
 
 
-def serve_client(conn: socket.socket, addr, sink: FifoSink) -> None:
+def serve_client(conn: socket.socket, addr, sink: FifoSink, aspect: float) -> None:
     log(f"client connected: {addr[0]}:{addr[1]}")
     global _ACTIVE
     _ACTIVE += 1
     active: set[int] = set()
+    try:
+        # 握手：告诉平板端 Mac 显示器的宽高比，用于画活动框
+        conn.sendall(("#aspect %.6f\n" % aspect).encode("ascii"))
+    except OSError:
+        pass
     sink.write("c")  # 新连接先清空可能残留的触点
     counts = {"d": 0, "m": 0, "u": 0}
     conn.settimeout(None)
@@ -140,18 +165,22 @@ def main() -> int:
     ap.add_argument("--listen", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=47777)
     ap.add_argument("--fifo", default="/tmp/touchpipe")
+    ap.add_argument("--aspect", default="16:9",
+                    help='Mac 显示器宽高比，如 "16:9"、"16:10"、"1.7778"')
     args = ap.parse_args()
 
+    aspect = parse_aspect(args.aspect)
     sink = FifoSink(args.fifo)
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((args.listen, args.port))
     srv.listen(4)
-    log(f"listening on {args.listen}:{args.port} -> {args.fifo}")
+    log(f"listening on {args.listen}:{args.port} -> {args.fifo} aspect={aspect:.4f}")
     try:
         while True:
             conn, addr = srv.accept()
-            threading.Thread(target=serve_client, args=(conn, addr, sink), daemon=True).start()
+            threading.Thread(target=serve_client, args=(conn, addr, sink, aspect),
+                             daemon=True).start()
     except KeyboardInterrupt:
         pass
     finally:

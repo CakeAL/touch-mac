@@ -25,14 +25,20 @@ adb install -r android-app/build/touchbridge.apk
 adb shell am start -n com.touchbridge.pad/.MainActivity
 ```
 
-App 会占满屏幕、黑底，左上角显示链路状态：
+App 会占满屏幕、黑底，中间画一个和 Mac 显示器同宽高比的活动框（默认 16:9），
+左上角显示链路状态：
 
 ```
 adb reverse tcp:47777 · connected
-touching: 0
+touching: 0   frame: 1.778 (host)
+长按切换比例 · 只有框内区域会转发触摸
 ```
 
 `no link` 表示 Mac 侧还没起 `bridge/session.sh --net`。
+
+只有框内的触摸会被转发，框内坐标线性映射到 Mac 全屏，所以平板上看到的就是
+Mac 屏幕的等比缩放，不会因为两机比例不同而拉歪。长按（700 ms）可以在
+16:9 / 16:10 / 4:3 / 满屏之间切换；比例默认由 Mac 侧下发（见下）。
 
 ## Mac 侧
 
@@ -50,8 +56,17 @@ u <id> <x> <y>    抬起
 c                 取消全部触点
 ```
 
-坐标归一化到 `0..1`，**原点在左下角**（与 Moonlight 的触控坐标系一致，y 需要从
-Android 的左上原点翻转）。每行一条，TCP 流式传输。
+坐标归一化到 `0..1`，**原点在左上角**：Sunshine 把这个 y 直接写进 HID digitizer 的
+y（0 = 屏幕顶端），WindowServer 再转成 AppKit 的左下原点坐标。实测
+`AppKit.y = (1 - y) * screenHeight`，所以**不要**再翻转一次，否则上下颠倒。
+
+Mac 侧连接成功后会先下发一行握手信息：
+
+```
+#aspect 1.777778        Mac 主显示器的宽高比（session.sh 自动探测）
+```
+
+App 收到后把活动框调整成该比例。
 
 ## 已知边界
 
