@@ -145,12 +145,19 @@ public class MainActivity extends Activity {
         video.setStateListener(s -> {
             TouchSurface t = touch;
             if (t != null) t.postInvalidateOnAnimation();
+            // 首帧之前把视频层藏起来：解码器还没拿到参考帧时可能吐绿帧/花屏
+            if (videoView != null) {
+                // 用 alpha 而不是 visibility：SurfaceView 一旦 INVISIBLE 会销毁 Surface，
+                // 解码器就没地方输出，永远等不到首帧。
+                videoView.setAlpha(video.hasRendered() ? 1f : 0f);
+            }
         });
 
         touch = new TouchSurface(this, link, video);
         link.surface = touch;
 
         videoView = new SurfaceView(this);
+        videoView.setAlpha(0f);
         videoView.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {

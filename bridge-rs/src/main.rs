@@ -245,6 +245,9 @@ async fn run_session(
 
     let ctl = control::spawn(rh.clone(), ctrl_port, connect_data.unwrap_or(0), rikey_raw.clone().try_into().unwrap())?;
     *slot.lock().unwrap() = Some(ctl.clone());
+    // 平板连上时就先要一个关键帧：否则要等 Sunshine 的周期性 GOP（约 5s）才有 IDR，
+    // 期间平板只能看到黑屏/等待，体感是"刚连上要好几秒才出画面"。
+    let _ = ctl.send(control::Cmd::RequestIdr);
 
     let audio_task = tokio::spawn({
         let atx = atx.clone();

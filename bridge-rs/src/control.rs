@@ -194,6 +194,10 @@ fn run(ip: &str, port: u16, connect_data: u32, key: [u8; 16], rx: Receiver<Cmd>)
                         let pkt = crypt.seal(ty, &payload);
                         unsafe { tb_send(peer, CH_GENERIC, pkt.as_ptr(), pkt.len() as c_int, 1) };
                     }
+                    // 连着就把关键帧要过来：命令必须在 ENet 真正连上之后发，
+                    // 之前从外面发（control::spawn 返回时）还在握手，会被丢掉。
+                    let pkt = crypt.seal(TYPE_IDR, &[0u8, 0u8]);
+                    unsafe { tb_send(peer, CH_GENERIC, pkt.as_ptr(), pkt.len() as c_int, 1) };
                     unsafe { tb_flush(host) };
                 }
                 2 => {

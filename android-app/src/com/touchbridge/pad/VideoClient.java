@@ -49,8 +49,19 @@ public final class VideoClient {
     /** 低延迟解码（Qualcomm 上可能引起画面撕裂）。可通过设置面板关闭。 */
     private volatile boolean lowLatency = false;
 
-    /** 给 Surface 的帧率提示，等于实际码流帧率（不是面板刷新率）。 */
-    private volatile float frameRateHint = 60f;
+    /** 给 Surface 的帧率提示；可从 /data/local/tmp/tb_hint 固定（调试用，0=按实测自适应）。 */
+    private volatile float frameRateHint = 120f;
+    private static final float FIXED_HINT = readFixedHint();
+
+    private static float readFixedHint() {
+        try (java.io.BufferedReader r = new java.io.BufferedReader(
+                new java.io.FileReader("/data/local/tmp/tb_hint"))) {
+            String l = r.readLine();
+            if (l != null) return Float.parseFloat(l.trim());
+        } catch (Exception ignore) {
+        }
+        return 0f;
+    }
     private float measuredFps = 0f;
     private long fpsWindowStart = 0;
     private int fpsWindowFrames = 0;
@@ -127,6 +138,9 @@ public final class VideoClient {
     private long appliedGen = -1;
     private Surface appliedSurface;
     private boolean needKey = true;
+    private int debugFrames = 0;
+    /** 是否已经渲染过至少一帧（用于首帧前把 SurfaceView 藏起来，避免绿屏/花屏闪现）。 */
+    private volatile boolean rendered = false;
     private boolean gotFrame;
 
     private volatile String netState = "connecting…";
@@ -188,6 +202,7 @@ public final class VideoClient {
 
     /** 按实测码流帧率给 Surface 帧率提示，避免 60fps 内容配 120Hz 提示造成节奏错乱。 */
     private void noteFrameForFps() {
+        if (FIXED_HINT > 0) return;
         long now = SystemClock.elapsedRealtime();
         if (fpsWindowStart == 0) {
             fpsWindowStart = now;
@@ -218,6 +233,10 @@ public final class VideoClient {
         }
     }
 
+    boolean hasRendered() {
+        return rendered;
+    }
+
     void setSurface(Surface s, int w, int h) {
         synchronized (codecLock) {
             surface = s;
@@ -228,7 +247,8 @@ public final class VideoClient {
         // 白白多等一个 16.7 ms 的 vsync。
         try {
             if (Build.VERSION.SDK_INT >= 30 && s != null) {
-                s.setFrameRate(frameRateHint, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+                        s.setFrameRate(FIXED_HINT > 0 ? FIXED_HINT : frameRateHint,
+                        Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
             }
         } catch (Exception e) {
             Log.w(TAG, "setFrameRate failed: " + e);
@@ -514,9 +534,16 @@ public final class VideoClient {
                     needKey = true;
                 }
                 if (f != null && (!needKey || f.key)) {
+                    if (debugFrames < 20) {
+                        Log.i(TAG, "video feed #" + debugFrames + " key=" + f.key
+                                + " size=" + f.data.length + " pts=" + f.ptsUs + " needKey=" + needKey);
+                    }
                     if (feedLocked(c, f)) {
+                        if (debugFrames < 20) debugFrames++;
                         needKey = false;
                     }
+                } else if (f != null && debugFrames < 20) {
+                    Log.i(TAG, "video skip non-key while waiting (size=" + f.data.length + ")");
                 }
                 drainLocked(c, info);
             }
@@ -598,7 +625,10 @@ public final class VideoClient {
         needKey = true;
         gotFrame = false;
         wantResync = false;
-        frames.clear();          // 新 codec 只能从 IDR 开始喂
+        // 新 codec 只能从 IDR 开始喂：保留已排队的 IDR（首帧常见情况），其余丢掉，
+        // 同时立刻向桥请求一个关键帧，避免白等一个 GOP。
+        frames.removeIf(f -> !f.key);
+        if (frames.isEmpty() && idrRequester != null) idrRequester.run();
         inflightSendUs.clear();
         inflightFeedUs.clear();
         Log.i(TAG, "video codec started " + c.getName() + " " + w + "x" + h
@@ -631,11 +661,15 @@ public final class VideoClient {
 
     /** 送一个 access unit。返回 true 表示成功进了解码器。 */
     private boolean feedLocked(MediaCodec c, Frame f) {
-        long deadline = SystemClock.elapsedRealtime() + 60;
+        return feedLocked(c, f, f.key ? 2000 : 60);
+    }
+
+    private boolean feedLocked(MediaCodec c, Frame f, long timeoutMs) {
+        long deadline = SystemClock.elapsedRealtime() + timeoutMs;
         while (true) {
             int in;
             try {
-                in = c.dequeueInputBuffer(5000);
+                in = c.dequeueInputBuffer(Math.min(50, timeoutMs));
             } catch (IllegalStateException ise) {
                 Log.w(TAG, "video dequeueInputBuffer failed: " + ise);
                 return false;
@@ -752,6 +786,8 @@ public final class VideoClient {
                 if (!gotFrame) {
                     gotFrame = true;
                     Log.i(TAG, "video first frame rendered (" + videoW + "x" + videoH + ")");
+                    rendered = true;
+                    if (listener != null) listener.onState(decState);
                     setDecState("playing " + videoW + "x" + videoH);
                 }
             }

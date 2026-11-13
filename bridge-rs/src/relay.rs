@@ -74,6 +74,7 @@ async fn handle(
             m = rx.recv() => match m {
                 Ok(VideoMsg::Config(c)) => write_msg(&mut sock, MSG_CONFIG, &c).await?,
                 Ok(VideoMsg::Frame { pts_us, key, send_us, data }) => {
+                    if key { eprintln!("[video] → client key frame pts={pts_us}us {}B", data.len()); }
                     let mut head = [0u8; 17];
                     head[..8].copy_from_slice(&pts_us.to_be_bytes());
                     head[8] = key as u8;
