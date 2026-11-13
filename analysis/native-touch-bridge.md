@@ -247,3 +247,13 @@ Sunshine 的二进制与签名均未改动（`codesign --verify --deep --strict`
    会变成“6 参调 5 参函数”，`tb_connect` 写坏指针直接 SIGSEGV。
 3. **CONFIG 去重**：每个 IDR 都带 SPS/PPS，若每次都下发 CONFIG，
    平板端解码器每 5 秒重建一次，画面永远停在「等待画面…」。
+
+## 10. 延时与颜色（2026-11-13 20:1x）
+
+- 平板 `WindowManager.LayoutParams.preferredDisplayModeId` 选 120 Hz（`Display.Mode 1 @ 120.00001Hz`），
+  并给 `Surface` 设 `setFrameRate(120f, FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)`。
+  **实测状态行延时从 42 ms 降到 13–14 ms**（之前 SurfaceFlinger 按 60 Hz 合成，每帧白等一个 vsync）。
+- 颜色：`x-nv-video[0].encoderCscMode=2` 会让平板解出整体偏绿的画面（实测截图全绿）；
+  改回 `0`（Rec.601 limited）后颜色正常。可用 `CSC=2` 环境变量复现。
+- 桥的重启（设置界面 `apply`）会断开触控连接：App 的读线程原来只在写失败时才重连，
+  现在读线程 EOF 时主动 `closeQuietly()`，写线程随即退出并 400 ms 后重连 → 自动恢复会话。

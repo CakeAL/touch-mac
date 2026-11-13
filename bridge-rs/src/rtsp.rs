@@ -194,7 +194,11 @@ pub fn build_sdp(
         ("x-nv-audio.surround.enable", "0".into()),
         ("x-nv-audio.surround.AudioQuality", "0".into()),
         ("x-nv-aqos.packetDuration", "5".into()),
-        ("x-nv-video[0].encoderCscMode", "2".into()),
+        (
+            "x-nv-video[0].encoderCscMode",
+            // 0=Rec.601 limited；2 会让平板解出整体偏绿的画面（实测），所以默认 0。
+            std::env::var("CSC").unwrap_or_else(|_| "0".into()),
+        ),
     ];
     for (k, v) in attrs {
         s.push_str(&format!("a={k}:{v} \r\n"));

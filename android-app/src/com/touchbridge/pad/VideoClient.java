@@ -145,6 +145,15 @@ public final class VideoClient {
             surfaceW = w;
             surfaceH = h;
         }
+        // 显式告诉系统这块 surface 要按高帧率出图：不然 SurfaceFlinger 可能按 60 Hz 合成，
+        // 白白多等一个 16.7 ms 的 vsync。
+        try {
+            if (Build.VERSION.SDK_INT >= 30 && s != null) {
+                s.setFrameRate(120f, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "setFrameRate failed: " + e);
+        }
         Log.i(TAG, "video surface ready " + w + "x" + h);
     }
 

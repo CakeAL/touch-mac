@@ -11,6 +11,7 @@ import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
 import android.util.SparseArray;
+import android.view.Display;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.SurfaceHolder;
@@ -57,12 +58,39 @@ public class MainActivity extends Activity {
     private SurfaceView videoView;
     private FrameLayout root;
     private Link link;
+    private boolean requested120;
     private VideoClient video;
+
+    /** 选一个最高刷新率的显示模式：默认 60 Hz 时每帧要多等一个 vsync。 */
+    private void requestHighRefresh() {
+        try {
+            Display d = getDisplay();
+            if (d == null) return;
+            int bestId = -1;
+            float bestRate = 0f;
+            for (Display.Mode m : d.getSupportedModes()) {
+                if (m.getRefreshRate() > bestRate) {
+                    bestRate = m.getRefreshRate();
+                    bestId = m.getModeId();
+                }
+            }
+            if (bestId >= 0) {
+                WindowManager.LayoutParams lp = getWindow().getAttributes();
+                lp.preferredDisplayModeId = bestId;
+                getWindow().setAttributes(lp);
+                requested120 = bestRate > 100f;
+                Log.i(TAG, "display mode -> " + bestId + " @ " + bestRate + "Hz");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "requestHighRefresh failed: " + e);
+        }
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        requestHighRefresh();
 
         link = new Link();
         video = new VideoClient();
@@ -537,6 +565,13 @@ public class MainActivity extends Activity {
                         }
                     }
                 } catch (Exception ignore) {
+                } finally {
+                    // 对端关闭（bridge 重启 / 会话结束）时，读线程先退出；必须把 socket 关掉，
+                    // 否则写线程会一直卡在 queue.poll 上，永远不会重连。
+                    if (running && socket == s) {
+                        state = "reconnecting...";
+                        closeQuietly();
+                    }
                 }
             }, "touch-reader");
             t.setDaemon(true);
