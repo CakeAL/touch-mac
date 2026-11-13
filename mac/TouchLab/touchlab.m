@@ -9,6 +9,7 @@ static void LG(NSString *fmt, ...) {
     va_end(ap);
     NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], s];
     printf("%s", [line UTF8String]);
+    NSLog(@"%@", s);
     NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:gLogPath];
     if (!fh) { [[NSFileManager defaultManager] createFileAtPath:gLogPath contents:nil attributes:nil]; fh = [NSFileHandle fileHandleForWritingAtPath:gLogPath]; }
     [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile];
@@ -55,9 +56,19 @@ static void LG(NSString *fmt, ...) {
     NSDictionary *attrs = @{NSFontAttributeName: [NSFont systemFontOfSize:22], NSForegroundColorAttributeName: [NSColor labelColor]};
     [@"TouchLab — 用手指点这里\n（若只看到 mouse 事件，说明没拿到 direct touch）" drawAtPoint:NSMakePoint(40, 60) withAttributes:attrs];
 }
-- (void)didClick { self.clicks++; LG(@"[gesture] click #%ld", (long)self.clicks); }
+- (void)didClick {
+    self.clicks++;
+    NSEvent *e = NSApp.currentEvent;
+    LG(@"[gesture] click #%ld eventType=%ld touches=%lu loc=%@", (long)self.clicks,
+       (long)e.type, (unsigned long)[e touchesMatchingPhase:NSTouchPhaseAny inView:nil].count, NSStringFromPoint(e.locationInWindow));
+}
 - (void)didPan:(NSPanGestureRecognizer *)g {
-    if (g.state == NSGestureRecognizerStateBegan) { self.pans++; LG(@"[gesture] pan began #%ld", (long)self.pans); }
+    if (g.state == NSGestureRecognizerStateBegan) {
+        self.pans++;
+        NSEvent *e = NSApp.currentEvent;
+        LG(@"[gesture] pan began #%ld eventType=%ld touches=%lu loc=%@", (long)self.pans,
+           (long)e.type, (unsigned long)[e touchesMatchingPhase:NSTouchPhaseAny inView:nil].count, NSStringFromPoint(e.locationInWindow));
+    }
 }
 - (void)didMagnify:(NSMagnificationGestureRecognizer *)g {
     if (g.state == NSGestureRecognizerStateBegan) LG(@"[gesture] magnify began");
@@ -75,32 +86,45 @@ static void LG(NSString *fmt, ...) {
     for (NSScreen *s in [NSScreen screens])
         LG(@"[screen] %@ touchCaps=%lu", [s localizedName] ?: @"?", (unsigned long)s.touchCapabilities);
 
+    LG(@"[app] creating window");
     NSRect frame = NSMakeRect(0, 0, 900, 600);
     self.window = [[NSWindow alloc] initWithContentRect:frame
         styleMask:(NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable)
         backing:NSBackingStoreBuffered defer:NO];
     self.window.title = @"TouchLab (macOS 27 direct-touch probe)";
     [self.window center];
+    LG(@"[app] window created");
 
     NSView *content = self.window.contentView;
     LabView *lab = [[LabView alloc] initWithFrame:content.bounds];
     lab.autoresizingMask = NSViewWidthSizable|NSViewHeightSizable;
     [content addSubview:lab];
+    LG(@"[app] lab added");
 
+    LG(@"[app] adding click");
     NSClickGestureRecognizer *click = [[NSClickGestureRecognizer alloc] initWithTarget:lab action:@selector(didClick)];
-    click.allowedTouchTypes = NSTouchTypeMaskDirect | NSTouchTypeMaskIndirect;
+    // 只允许 Direct：AppKit 对 Indirect 会抛 NSInternalInconsistencyException
+    click.allowedTouchTypes = NSTouchTypeMaskDirect;
     [lab addGestureRecognizer:click];
+    LG(@"[app] click added");
 
+    LG(@"[app] adding pan");
     NSPanGestureRecognizer *pan = [[NSPanGestureRecognizer alloc] initWithTarget:lab action:@selector(didPan:)];
     [lab addGestureRecognizer:pan];
+    LG(@"[app] pan added");
 
+    LG(@"[app] adding mag");
     NSMagnificationGestureRecognizer *mag = [[NSMagnificationGestureRecognizer alloc] initWithTarget:lab action:@selector(didMagnify:)];
     [lab addGestureRecognizer:mag];
+    LG(@"[app] mag added");
 
+    LG(@"[app] adding logger");
     TouchLogger *logger = [[TouchLogger alloc] initWithTarget:nil action:NULL];
     [lab addGestureRecognizer:logger];
+    LG(@"[app] recognizers added");
 
     [self.window makeKeyAndOrderFront:nil];
+    LG(@"[app] ordered front");
     [NSApp activateIgnoringOtherApps:YES];
     LG(@"[app] window up; NSIsTouchNative=%@", [[NSBundle mainBundle] objectForInfoDictionaryKey:@"NSIsTouchNative"] ?: @"(absent)");
 }
