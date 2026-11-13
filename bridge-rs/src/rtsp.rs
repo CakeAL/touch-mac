@@ -138,12 +138,24 @@ impl Rtsp {
 }
 
 /// 生成 ANNOUNCE 的 SDP（照抄 SdpGenerator 的顺序与“行尾多一个空格”怪癖）。
-pub fn build_sdp(video_port: u16, width: u32, height: u32, fps: u32, bitrate_kbps: u32, host: &str) -> String {
+pub fn build_sdp(
+    video_port: u16,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
+    host: &str,
+    hevc: bool,
+    hdr: bool,
+) -> String {
     let mut s = String::new();
     s.push_str("v=0\r\n");
     s.push_str(&format!("o=android 0 14 IN IPv4 {host}\r\n"));
     s.push_str("s=NVIDIA Streaming Client\r\n");
-    let min_bw = (bitrate_kbps as f64 * 0.8) as u32;
+    let bw = bitrate_kbps.to_string();
+    let hevc_support = if hevc { "1" } else { "0" };
+    let bitstream = if hevc { "1" } else { "0" };
+    let dr_mode = if hdr { "1" } else { "0" };
     let attrs: Vec<(&str, String)> = vec![
         ("x-ml-general.featureFlags", "3".into()),
         ("x-ss-general.encryptionEnabled", "1".into()),
@@ -156,10 +168,10 @@ pub fn build_sdp(video_port: u16, width: u32, height: u32, fps: u32, bitrate_kbp
         ("x-nv-video[0].rateControlMode", "4".into()),
         ("x-nv-video[0].timeoutLengthMs", "7000".into()),
         ("x-nv-video[0].framesWithInvalidRefThreshold", "0".into()),
-        ("x-nv-video[0].initialBitrateKbps", min_bw.to_string()),
-        ("x-nv-video[0].initialPeakBitrateKbps", min_bw.to_string()),
-        ("x-nv-vqos[0].bw.minimumBitrateKbps", min_bw.to_string()),
-        ("x-nv-vqos[0].bw.maximumBitrateKbps", min_bw.to_string()),
+        ("x-nv-video[0].initialBitrateKbps", bw.clone()),
+        ("x-nv-video[0].initialPeakBitrateKbps", bw.clone()),
+        ("x-nv-vqos[0].bw.minimumBitrateKbps", bw.clone()),
+        ("x-nv-vqos[0].bw.maximumBitrateKbps", bw.clone()),
         ("x-ml-video.configuredBitrateKbps", bitrate_kbps.to_string()),
         ("x-nv-vqos[0].fec.enable", "1".into()),
         ("x-nv-vqos[0].videoQualityScoreUpdateTime", "5000".into()),
@@ -172,9 +184,9 @@ pub fn build_sdp(video_port: u16, width: u32, height: u32, fps: u32, bitrate_kbp
         ("x-nv-vqos[0].drc.enable", "0".into()),
         ("x-nv-general.enableRecoveryMode", "0".into()),
         ("x-nv-video[0].videoEncoderSlicesPerFrame", "1".into()),
-        ("x-nv-clientSupportHevc", "0".into()),
-        ("x-nv-vqos[0].bitStreamFormat", "0".into()),
-        ("x-nv-video[0].dynamicRangeMode", "0".into()),
+        ("x-nv-clientSupportHevc", hevc_support.into()),
+        ("x-nv-vqos[0].bitStreamFormat", bitstream.into()),
+        ("x-nv-video[0].dynamicRangeMode", dr_mode.into()),
         ("x-nv-video[0].maxNumReferenceFrames", "0".into()),
         ("x-nv-video[0].clientRefreshRateX100", (fps * 100).to_string()),
         ("x-nv-audio.surround.numChannels", "2".into()),
@@ -182,7 +194,7 @@ pub fn build_sdp(video_port: u16, width: u32, height: u32, fps: u32, bitrate_kbp
         ("x-nv-audio.surround.enable", "0".into()),
         ("x-nv-audio.surround.AudioQuality", "0".into()),
         ("x-nv-aqos.packetDuration", "5".into()),
-        ("x-nv-video[0].encoderCscMode", "0".into()),
+        ("x-nv-video[0].encoderCscMode", "2".into()),
     ];
     for (k, v) in attrs {
         s.push_str(&format!("a={k}:{v} \r\n"));

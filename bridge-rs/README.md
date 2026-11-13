@@ -33,18 +33,19 @@ AES-128-GCM 信封、Sunshine 私有视频切片），因此是一个无依赖�
 ## 用法
 
 ```bash
-cargo build --release
-./target/release/touchbridge
+bridge-rs/run.sh setup    # 一次性：adb reverse 47777 触控 / 47779 视频 / 47781 设置
+bridge-rs/run.sh -d       # 后台常驻（日志 /tmp/touchbridge.log）
+bridge-rs/run.sh          # 或前台跑，Ctrl-C 退出
 ```
 
-参数（`--help` 可看全部）：`--host 127.0.0.1 --appid 881448767 --width 1920 --height 1080 --fps 60 --bitrate 20000`。
+**按需唤醒**：桥启动后只是待机（不调用 /launch）。平板 App 一连上触控口，桥就
+①检查 Sunshine 是否在跑（不在就 `open -a /Applications/Sunshine.app` 并等 47984 就绪）
+②`/launch` + RTSP + 控制流 + 视频/音频；App 一断开（或切后台超过 3 秒），桥发
+`Cmd::Shutdown`、`/cancel`，VoidLink 设备随之消失。这样平板不开就不占编码器、
+不留虚拟触控屏。
 
-平板侧：
-
-```bash
-adb reverse tcp:47777 tcp:47777   # 触控
-adb reverse tcp:47779 tcp:47779   # 视频
-```
+参数（`--help` 可看全部）：`--host 127.0.0.1 --appid 881448767 --width 1920 --height 1080 --fps 120 --bitrate 40000 --hevc 1 --hdr 1 --audio 1`；
+也可以不传参数，默认值读 `~/.config/touchbridge/settings`（平板设置界面写这个文件）。
 
 ## 中转帧格式（与 `android-app` 的 VideoClient 对应）
 
@@ -65,6 +66,14 @@ type=0x02 FRAME : u64 BE pts_us | u8 flags(bit0=key) | Annex-B AU
 - **每个 IDR 都带 SPS/PPS，但不能每次都下发 CONFIG**：否则平板端解码器每 5 秒重建一次，永远停在「等待画面」。
 - 客户端连上来后必须**主动请求一个 IDR**，否则只能等下一帧关键帧（默认 5s 一次兜底）。
 - 会话必须有视频和音频两条流：服务端 10s 收不到对应 UDP ping 就整场结束（`stream_audio=false` 时音频 ping 也要发）。
+
+## 按需会话（2026-11-13）
+
+- `main.rs` 是 supervisor：常驻 `relay/touch/control_port`，`clients_rx`（触控连接数）从 0→1 时
+  `spawn run_session`，回到 0 后等 3 秒再置 stop；`ControlHandle::alive()` 为 false（服务端断流）
+  也会结束会话。
+- 音频/视频/保活 ping 都跟着会话任务一起起停（`video::run` 的 ping 已在主 `select!` 里，
+  不再 spawn 独立任务，否则会话结束会留下 Connection refused 刷屏）。
 
 ## 实测（2026-11-13）
 

@@ -51,6 +51,7 @@ pub async fn serve(
     addr: SocketAddr,
     tx: mpsc::Sender<TouchEvent>,
     aspect: f32,
+    clients: tokio::sync::watch::Sender<usize>,
 ) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     eprintln!("[touch] listening on {}", addr);
@@ -64,10 +65,14 @@ pub async fn serve(
         };
         eprintln!("[touch] client {peer}");
         let tx = tx.clone();
+        let cl = clients.clone();
+        cl.send_modify(|n| *n += 1);
         tokio::spawn(async move {
             if let Err(e) = handle(sock, tx, aspect).await {
                 eprintln!("[touch] {peer}: {e}");
             }
+            cl.send_modify(|n| *n = n.saturating_sub(1));
+            eprintln!("[touch] client {peer} 断开");
         });
     }
 }
@@ -77,6 +82,9 @@ async fn handle(sock: TcpStream, tx: mpsc::Sender<TouchEvent>, aspect: f32) -> R
     // 握手：先发目标宽高比，平板据此画活动框。
     let _ = wr
         .write_all(format!("#aspect {aspect:.6}\n").as_bytes())
+        .await;
+    let _ = wr
+        .write_all(format!("#t0 {}\n", crate::now_us()).as_bytes())
         .await;
     let mut lines = BufReader::new(rd).lines();
     let mut sent_cancel = false;
@@ -93,7 +101,13 @@ async fn handle(sock: TcpStream, tx: mpsc::Sender<TouchEvent>, aspect: f32) -> R
                     .await;
             }
             None => {
-                if !line.trim().is_empty() {
+                let t = line.trim();
+                if t == "p" {
+                    // 时钟校准：平板发来 p，回 bridge 当前单调微秒。
+                    let _ = wr
+                        .write_all(format!("#pong {}\n", crate::now_us()).as_bytes())
+                        .await;
+                } else if !t.is_empty() {
                     eprintln!("[touch] bad line: {line:?}");
                 }
             }

@@ -47,24 +47,33 @@ pub enum Cmd {
 #[derive(Clone)]
 pub struct ControlHandle {
     tx: Sender<Cmd>,
+    alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ControlHandle {
     pub fn send(&self, cmd: Cmd) {
         let _ = self.tx.send(cmd);
     }
+
+    /// 控制流是否还活着（服务端断开会话时用来结束本地会话）。
+    pub fn alive(&self) -> bool {
+        self.alive.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 pub fn spawn(host_ip: String, port: u16, connect_data: u32, key: [u8; 16]) -> Result<ControlHandle> {
     let (tx, rx) = channel::<Cmd>();
+    let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let alive2 = alive.clone();
     std::thread::Builder::new()
         .name("control".into())
         .spawn(move || {
             if let Err(e) = run(&host_ip, port, connect_data, key, rx) {
                 eprintln!("[ctl] 退出: {e}");
             }
+            alive2.store(false, std::sync::atomic::Ordering::Relaxed);
         })?;
-    Ok(ControlHandle { tx })
+    Ok(ControlHandle { tx, alive })
 }
 
 struct Crypt {

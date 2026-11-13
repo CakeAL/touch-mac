@@ -74,41 +74,42 @@ pub async fn run(
     eprintln!("[video] udp local {} -> {server}", sock.local_addr()?);
 
     // 500ms 一次 ping：既保活，也让服务器学到我们的地址（先 ping 才会推流）。
-    {
-        let sock = sock.clone();
-        tokio::spawn(async move {
-            let mut tick = interval(Duration::from_millis(500));
-            let mut seq: u32 = 0;
-            loop {
-                tick.tick().await;
-                let mut buf = [0u8; 20];
-                let mut len = 4;
-                if let Some(p) = &ping_payload {
-                    buf[..16].copy_from_slice(p);
-                    buf[16..].copy_from_slice(&seq.to_be_bytes());
-                    len = 20;
-                } else {
-                    buf[..4].copy_from_slice(b"PING");
-                }
-                seq = seq.wrapping_add(1);
-                if let Err(e) = sock.send(&buf[..len]).await {
-                    eprintln!("[video] ping: {e}");
-                }
-            }
-        });
+    // 放在主循环里 select，会话结束时随任务一起退出，不留后台线程。
+    let mut tick = interval(Duration::from_millis(500));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut ping_seq: u32 = 0;
+    let mut pingbuf = [0u8; 20];
+    if let Some(p) = &ping_payload {
+        pingbuf[..16].copy_from_slice(p);
     }
 
     let mut cur: Option<Frame> = None;
     let mut buf = vec![0u8; 4096];
     let mut frames: u64 = 0;
     loop {
-        let n = match sock.recv(&mut buf).await {
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("[video] recv: {e}");
-                tokio::time::sleep(Duration::from_millis(20)).await;
+        let n = tokio::select! {
+            _ = tick.tick() => {
+                let (bufp, len) = match &ping_payload {
+                    Some(_) => {
+                        pingbuf[16..].copy_from_slice(&ping_seq.to_be_bytes());
+                        ping_seq = ping_seq.wrapping_add(1);
+                        (&pingbuf[..], 20)
+                    }
+                    None => (&b"PING"[..], 4),
+                };
+                if let Err(e) = sock.send(&bufp[..len]).await {
+                    eprintln!("[video] ping: {e}");
+                }
                 continue;
             }
+            r = sock.recv(&mut buf) => match r {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("[video] recv: {e}");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+            },
         };
         if n <= PAYLOAD_OFF {
             continue;
@@ -200,33 +201,64 @@ fn emit(f: Frame, mut data: BytesMut, n: u64, tx: &broadcast::Sender<VideoMsg>, 
     while data.last() == Some(&0) {
         data.truncate(data.len() - 1);
     }
-    let (sps, pps, idr) = scan(&data);
-    if let (Some(sps), Some(pps)) = (sps, pps) {
-        let mut csd = BytesMut::with_capacity(sps.len() + pps.len());
-        csd.extend_from_slice(&sps);
-        csd.extend_from_slice(&pps);
-        let csd = csd.freeze();
-        let csd = Arc::new(csd);
-        // 每个 IDR 都带 SPS/PPS，但只有在变化时才重下 CONFIG，否则客户端会不停重建解码器。
+    let sc = scan(&data);
+    if let Some(csd) = sc.csd {
+        // CONFIG = u8 codec(0=H.264, 1=HEVC) + Annex-B 参数集，只在变化时下发。
+        let mut buf = BytesMut::with_capacity(csd.len() + 1);
+        buf.extend_from_slice(&[if sc.hevc { 1 } else { 0 }]);
+        buf.extend_from_slice(&csd);
+        let csd = Arc::new(buf.freeze());
         let same = last.borrow().as_ref().map(|c| c.as_ref() == csd.as_ref()).unwrap_or(false);
         if !same {
+            eprintln!("[video] CONFIG {} {}B", if sc.hevc { "HEVC" } else { "H.264" }, csd.len() - 1);
             let _ = last.send(Some(csd.clone()));
             let _ = tx.send(VideoMsg::Config(csd));
         }
     }
-    let key = idr || f.frame_type == 2;
+    let key = sc.key || f.frame_type == 2;
     let pts_us = (f.ts as u64 * 1000 + 45) / 90;
     if key || data.len() > 50000 || n % 120 == 1 {
         eprintln!("[video] frame #{n} idx={} {}B key={key} pts={pts_us}us", f.index, data.len());
     }
-    let _ = tx.send(VideoMsg::Frame { pts_us, key, data: Arc::new(data.freeze()) });
+    // 每秒打一次实际入帧帧率，便于确认 60/120 Hz 是否真的生效。
+    {
+        static CNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static T0: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let c = CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let now = crate::now_us();
+        let mut t0 = T0.load(std::sync::atomic::Ordering::Relaxed);
+        if t0 == 0 {
+            T0.store(now, std::sync::atomic::Ordering::Relaxed);
+            t0 = now;
+        }
+        if now > t0 + 2_000_000 {
+            let fps = (c as f64) * 1_000_000.0 / ((now - t0) as f64);
+            eprintln!("[video] 入帧帧率 {fps:.1} fps（{c} 帧 / {:.2}s）", (now - t0) as f64 / 1e6);
+            CNT.store(0, std::sync::atomic::Ordering::Relaxed);
+            T0.store(now, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let send_us = crate::now_us();
+    let _ = tx.send(VideoMsg::Frame { pts_us, key, send_us, data: Arc::new(data.freeze()) });
 }
 
-/// 扫 Annex-B 找 SPS(7)/PPS(8) 与 IDR(5)，返回（拷贝后的）参数集。
-fn scan(data: &[u8]) -> (Option<Bytes>, Option<Bytes>, bool) {
-    let mut sps: Option<Bytes> = None;
-    let mut pps: Option<Bytes> = None;
-    let mut idr = false;
+/// Annex-B 扫描结果：参数集（按码流判定 H.264 / HEVC）与是否关键帧。
+struct Scan {
+    hevc: bool,
+    csd: Option<Bytes>,
+    key: bool,
+}
+
+/// 扫 Annex-B：H.264 取 SPS(7)/PPS(8)、IDR(5)；HEVC 取 VPS(32)/SPS(33)/PPS(34)、IRAP(16..=23)。
+fn scan(data: &[u8]) -> Scan {
+    let mut h264_sps: Option<Bytes> = None;
+    let mut h264_pps: Option<Bytes> = None;
+    let mut h264_idr = false;
+    let mut vps: Option<Bytes> = None;
+    let mut hevc_sps: Option<Bytes> = None;
+    let mut hevc_pps: Option<Bytes> = None;
+    let mut hevc_irap = false;
+
     let mut i = 0usize;
     while i + 3 < data.len() {
         let sc = if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
@@ -241,24 +273,54 @@ fn scan(data: &[u8]) -> (Option<Bytes>, Option<Bytes>, bool) {
         if hdr >= data.len() {
             break;
         }
-        let nal_type = data[hdr] & 0x1F;
+        let b = data[hdr];
+        let h264_type = b & 0x1F;
+        let hevc_type = (b >> 1) & 0x3F;
+
         // 下一个起始码作为本 NAL 结束
         let mut j = hdr + 1;
         while j + 3 < data.len() {
-            if data[j] == 0 && data[j + 1] == 0 && (data[j + 2] == 1 || (data[j + 2] == 0 && j + 3 < data.len() && data[j + 3] == 1)) {
+            if data[j] == 0
+                && data[j + 1] == 0
+                && (data[j + 2] == 1
+                    || (data[j + 2] == 0 && j + 3 < data.len() && data[j + 3] == 1))
+            {
                 break;
             }
             j += 1;
         }
         let end = j.min(data.len());
         let nal = Bytes::copy_from_slice(&data[i..end]);
-        match nal_type {
-            7 if sps.is_none() => sps = Some(nal),
-            8 if pps.is_none() => pps = Some(nal),
-            5 => idr = true,
+
+        match h264_type {
+            7 if h264_sps.is_none() => h264_sps = Some(nal.clone()),
+            8 if h264_pps.is_none() => h264_pps = Some(nal.clone()),
+            5 => h264_idr = true,
+            _ => {}
+        }
+        match hevc_type {
+            32 if vps.is_none() => vps = Some(nal.clone()),
+            33 if hevc_sps.is_none() => hevc_sps = Some(nal),
+            34 if hevc_pps.is_none() => hevc_pps = Some(nal),
+            16..=23 => hevc_irap = true,
             _ => {}
         }
         i = end.max(i + sc + 1);
     }
-    (sps, pps, idr)
+
+    // HEVC 检出 VPS/SPS 即认定 HEVC（H.264 的 7/8 在 HEVC 解释下是 3/4，不会误判成参数集）。
+    let hevc = vps.is_some() || (hevc_sps.is_some() && hevc_pps.is_some());
+    if hevc {
+        let mut csd = BytesMut::new();
+        for p in [vps, hevc_sps, hevc_pps].into_iter().flatten() {
+            csd.extend_from_slice(&p);
+        }
+        Scan { hevc: true, csd: if csd.is_empty() { None } else { Some(csd.freeze()) }, key: hevc_irap }
+    } else {
+        let mut csd = BytesMut::new();
+        for p in [h264_sps, h264_pps].into_iter().flatten() {
+            csd.extend_from_slice(&p);
+        }
+        Scan { hevc: false, csd: if csd.is_empty() { None } else { Some(csd.freeze()) }, key: h264_idr }
+    }
 }

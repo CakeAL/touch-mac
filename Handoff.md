@@ -934,6 +934,18 @@ LCC 侧 10 s 无视频包即 `ML_ERROR_NO_VIDEO_TRAFFIC`。可以不解码（fak
   ④CONFIG 只在变化时下发，否则解码器每 5 s 重建；⑤新客户端连入要主动请求 IDR。
 - 细节见 `bridge-rs/README.md` 与 `analysis/native-touch-bridge.md` §9。
 
+### 14.9 按需会话：平板连上才唤醒 Sunshine（2026-11-13 20:2x）
+
+- 现状（VERIFIED）：桥启动即待机，**不**调用 `/launch`；平板 App 连上 47777 才开会话，
+  断开 3 秒后自动 `Shutdown` + `/cancel`，VoidLink 消失。实测：
+  `[main] 平板已连接，开始会话` → `frame #1 ... key=true`；
+  关闭 App → `[session] 客户端已全部断开，结束会话` → `/cancel` → `hidutil | grep -c voidlink` = 0。
+- Sunshine 冷启动也能被唤醒：先 `kill` 掉 Sunshine 再让平板连，日志出现
+  `[sunshine] 未在运行，唤醒 /Applications/Sunshine.app` → `[sunshine] 已就绪` → `/launch` 成功。
+- 入口脚本：`bridge-rs/run.sh setup`（adb reverse 47777/47779/47781）、`run.sh -d`（后台）、`run.sh`（前台）。
+- 音视频参数默认 1920×1080@120 / 40 Mbps / HEVC 10-bit / 音频开，存在
+  `~/.config/touchbridge/settings`，供平板设置界面写入。
+
 ### 14.6 下一步（需要决策）
 
 1. **A（当前可用）**：Mac 端桥接 + `adb` 转发触控。平板不显示 Mac 画面，只当触控面；改动最小。

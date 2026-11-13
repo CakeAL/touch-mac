@@ -37,6 +37,7 @@ public final class VideoClient {
     static final String HOST = "127.0.0.1";
     static final int PORT = 47779;
 
+    private static final int TYPE_AUDIO = 0x03;
     private static final int TYPE_CONFIG = 0x01;
     private static final int TYPE_FRAME = 0x02;
 
@@ -62,6 +63,22 @@ public final class VideoClient {
     private int surfaceW;
     private int surfaceH;
     private byte[] csd;
+    private String codecMime = "video/avc";
+    private String appliedMime = "video/avc";
+    private volatile AudioPlayer audio;
+    private final java.util.ArrayDeque<Long> inflightSendUs = new java.util.ArrayDeque<>();
+
+    /** 每渲染一帧回调一次，参数是 bridge 侧发出该帧的单调微秒。 */
+    interface RenderListener {
+        void onRendered(long sendUs);
+    }
+
+    private volatile RenderListener renderListener;
+
+    void setRenderListener(RenderListener l) {
+        renderListener = l;
+    }
+    private volatile boolean audioWanted = true;
     private long csdGen;
     private MediaCodec codec;
     private byte[] appliedCsd;
@@ -209,16 +226,60 @@ public final class VideoClient {
                 onConfig(payload);
             } else if (type == TYPE_FRAME) {
                 onFramePayload(payload);
+            } else if (type == TYPE_AUDIO) {
+                onAudioPayload(payload);
             } else {
                 Log.w(TAG, "video: unknown message type " + type + " len=" + len);
             }
         }
     }
 
+    private void onAudioPayload(byte[] payload) {
+        if (payload.length < 9) return;
+        long pts = 0;
+        for (int i = 0; i < 8; i++) {
+            pts = (pts << 8) | (payload[i] & 0xffL);
+        }
+        byte[] pcm = new byte[payload.length - 8];
+        System.arraycopy(payload, 8, pcm, 0, pcm.length);
+        AudioPlayer a = audio;
+        if (a == null) {
+            synchronized (codecLock) {
+                if (audio == null) {
+                    audio = new AudioPlayer();
+                    audio.start();
+                }
+                a = audio;
+            }
+        }
+        a.feed(pcm);
+    }
+
+    void setAudioEnabled(boolean on) {
+        AudioPlayer a = audio;
+        if (a != null) a.setEnabled(on);
+        audioWanted = on;
+    }
+
+    boolean audioEnabled() {
+        AudioPlayer a = audio;
+        return a != null && a.enabled();
+    }
+
     private void onConfig(byte[] payload) {
-        int[] wh = H264Sps.parse(payload);
+        if (payload.length < 2) {
+            Log.w(TAG, "video: short CONFIG " + payload.length);
+            return;
+        }
+        int codecId = payload[0] & 0xff;
+        byte[] annexb = new byte[payload.length - 1];
+        System.arraycopy(payload, 1, annexb, 0, annexb.length);
+        boolean hevc = codecId == 1;
+        String mime = hevc ? "video/hevc" : "video/avc";
+        int[] wh = hevc ? null : H264Sps.parse(annexb);
         synchronized (codecLock) {
-            csd = payload;
+            codecMime = mime;
+            csd = annexb;
             csdGen++;
             if (wh != null) {
                 videoW = wh[0];
@@ -233,7 +294,7 @@ public final class VideoClient {
     }
 
     private void onFramePayload(byte[] payload) {
-        if (payload.length < 9) {
+        if (payload.length < 17) {
             Log.w(TAG, "video: short FRAME message " + payload.length);
             return;
         }
@@ -243,19 +304,23 @@ public final class VideoClient {
         }
         int flags = payload[8] & 0xff;
         boolean key = (flags & 0x01) != 0;
+        long sendUs = 0;
+        for (int i = 9; i < 17; i++) {
+            sendUs = (sendUs << 8) | (payload[i] & 0xffL);
+        }
 
-        byte[] au = new byte[payload.length - 9];
-        System.arraycopy(payload, 9, au, 0, au.length);
+        byte[] au = new byte[payload.length - 17];
+        System.arraycopy(payload, 17, au, 0, au.length);
 
         if (surface == null || csd == null) {
             // surface 还没就绪（例如退到后台）：直接丢帧，别把队列灌满
             return;
         }
-        if (!frames.offer(new Frame(au, pts, key))) {
+        if (!frames.offer(new Frame(au, pts, key, sendUs))) {
             // 解码跟不上：丢掉积压，等下一个 IDR 重新同步
             frames.clear();
             wantResync = true;
-            frames.offer(new Frame(au, pts, key));
+            frames.offer(new Frame(au, pts, key, sendUs));
             Log.w(TAG, "video queue overflow, dropped backlog, resync at next IDR");
         }
     }
@@ -305,7 +370,9 @@ public final class VideoClient {
         Surface surf = surface;
         byte[] csdLocal = csd;
         long gen = csdGen;
-        if (codec != null && surf == appliedSurface && csdLocal == appliedCsd && gen == appliedGen) {
+        String mime = codecMime;
+        if (codec != null && surf == appliedSurface && csdLocal == appliedCsd && gen == appliedGen
+                && mime.equals(appliedMime)) {
             return true;
         }
         releaseCodecLocked();
@@ -328,8 +395,8 @@ public final class VideoClient {
 
         MediaCodec c = null;
         try {
-            c = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
-            MediaFormat fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h);
+            c = MediaCodec.createDecoderByType(mime);
+            MediaFormat fmt = MediaFormat.createVideoFormat(mime, w, h);
             fmt.setByteBuffer("csd-0", ByteBuffer.wrap(csdLocal));
             if (Build.VERSION.SDK_INT >= 30) {
                 try {
@@ -353,6 +420,7 @@ public final class VideoClient {
         }
 
         codec = c;
+        appliedMime = mime;
         appliedCsd = csdLocal;
         appliedGen = gen;
         appliedSurface = surf;
@@ -360,6 +428,7 @@ public final class VideoClient {
         gotFrame = false;
         wantResync = false;
         frames.clear();          // 新 codec 只能从 IDR 开始喂
+        inflightSendUs.clear();
         Log.i(TAG, "video codec started " + c.getName() + " " + w + "x" + h
                 + " low-latency=" + (Build.VERSION.SDK_INT >= 30 ? 1 : 0));
         setDecState("decoding " + w + "x" + h);
@@ -369,6 +438,7 @@ public final class VideoClient {
     private void releaseCodecLocked() {
         MediaCodec c = codec;
         codec = null;
+        appliedMime = "";
         appliedCsd = null;
         appliedGen = -1;
         appliedSurface = null;
@@ -413,6 +483,8 @@ public final class VideoClient {
                 buf.put(f.data);
                 try {
                     c.queueInputBuffer(in, 0, f.data.length, f.ptsUs, 0);
+                    inflightSendUs.addLast(f.sendUs);
+                    if (inflightSendUs.size() > 64) inflightSendUs.pollFirst();
                 } catch (IllegalStateException ise) {
                     Log.w(TAG, "video queueInputBuffer failed: " + ise);
                     needKey = true;
@@ -474,6 +546,9 @@ public final class VideoClient {
             } catch (Exception ignore) {
             }
             if (render) {
+                Long sent = inflightSendUs.pollFirst();
+                RenderListener l = renderListener;
+                if (sent != null && l != null) l.onRendered(sent);
                 lastFrameAt = SystemClock.elapsedRealtime();
                 if (!gotFrame) {
                     gotFrame = true;
@@ -538,11 +613,13 @@ public final class VideoClient {
         final byte[] data;
         final long ptsUs;
         final boolean key;
+        final long sendUs;
 
-        Frame(byte[] data, long ptsUs, boolean key) {
+        Frame(byte[] data, long ptsUs, boolean key, long sendUs) {
             this.data = data;
             this.ptsUs = ptsUs;
             this.key = key;
+            this.sendUs = sendUs;
         }
     }
 }
