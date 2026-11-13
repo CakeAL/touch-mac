@@ -7,8 +7,6 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.util.Log;
 import android.util.SparseArray;
 import android.view.MotionEvent;
@@ -85,9 +83,6 @@ public class MainActivity extends Activity {
 
     /** 触控面板：绘制活动框与触点反馈，并按活动框映射坐标。 */
     static class TouchSurface extends View {
-        private static final float[] ASPECTS = {16f / 9f, 16f / 10f, 4f / 3f, 0f};
-        private static final String[] ASPECT_LABELS = {"16:9", "16:10", "4:3", "满屏"};
-
         private Link link;
         private final Paint dot = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -100,13 +95,8 @@ public class MainActivity extends Activity {
         private final Set<Integer> ignored = new HashSet<>();
 
         private final RectF area = new RectF();
-        private float targetAspect = ASPECTS[0];
-        private int aspectIndex = 0;
+        private float targetAspect = 16f / 9f;
         private boolean aspectFromHost = false;
-
-        private final Handler handler = new Handler(Looper.getMainLooper());
-        private float downX, downY;
-        private boolean longFired;
 
         TouchSurface(Context c, Link link) {
             super(c);
@@ -183,15 +173,13 @@ public class MainActivity extends Activity {
             canvas.drawText(link.statusText(), tx, ty, text);
             canvas.drawText(String.format(Locale.US, "touching: %d   frame: %s",
                     active.size(), aspectLabel()), tx, ty + 44f, text);
-            canvas.drawText("长按切换比例 · 只有框内区域会转发触摸",
-                    tx, ty + 88f, hint);
+            canvas.drawText("只有框内区域会转发触摸", tx, ty + 88f, hint);
             if (active.size() > 0) postInvalidateOnAnimation();
         }
 
         private String aspectLabel() {
-            if (targetAspect <= 0f) return "满屏";
             if (aspectFromHost) return String.format(Locale.US, "%.3f (host)", targetAspect);
-            return ASPECT_LABELS[aspectIndex];
+            return String.format(Locale.US, "%.3f", targetAspect);
         }
 
         @Override
@@ -199,11 +187,7 @@ public class MainActivity extends Activity {
             final int action = e.getActionMasked();
             switch (action) {
                 case MotionEvent.ACTION_DOWN: {
-                    downX = e.getX();
-                    downY = e.getY();
-                    longFired = false;
-                    handler.postDelayed(longPress, 700);
-                    emit('d', e.getPointerId(0), downX, downY);
+                    emit('d', e.getPointerId(0), e.getX(), e.getY());
                     break;
                 }
                 case MotionEvent.ACTION_POINTER_DOWN: {
@@ -212,10 +196,6 @@ public class MainActivity extends Activity {
                     break;
                 }
                 case MotionEvent.ACTION_MOVE: {
-                    if (!longFired) {
-                        float dx = e.getX() - downX, dy = e.getY() - downY;
-                        if (dx * dx + dy * dy > 40f * 40f) handler.removeCallbacks(longPress);
-                    }
                     for (int i = 0; i < e.getPointerCount(); i++) {
                         emit('m', e.getPointerId(i), e.getX(i), e.getY(i));
                     }
@@ -236,28 +216,10 @@ public class MainActivity extends Activity {
                 default:
                     break;
             }
-            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                handler.removeCallbacks(longPress);
-            }
             invalidate();
             return true;
         }
 
-        private final Runnable longPress = new Runnable() {
-            @Override
-            public void run() {
-                longFired = true;
-                link.send('c', 0, 0f, 0f);
-                active.clear();
-                ignored.clear();
-                aspectFromHost = false;
-                aspectIndex = (aspectIndex + 1) % ASPECTS.length;
-                targetAspect = ASPECTS[aspectIndex];
-                recomputeArea();
-                Log.i(TAG, "aspect cycled to " + ASPECT_LABELS[aspectIndex]);
-                postInvalidateOnAnimation();
-            }
-        };
 
         private void emit(char kind, int id, float px, float py) {
             if (area.width() <= 0f || area.height() <= 0f) return;

@@ -920,7 +920,7 @@ LCC 侧 10 s 无视频包即 `ML_ERROR_NO_VIDEO_TRAFFIC`。可以不解码（fak
 - **活动框（16:9）**：`session.sh` 从 `system_profiler SPDisplaysDataType` 的
   `UI Looks like` 取 Mac 主显示器比例 → `touchd.py --aspect` → 连接时下发
   `#aspect 1.777778` → App 画居中活动框，框外触摸丢弃、框内线性映射到 Mac 全屏；
-  长按 700 ms 切换 16:9 / 16:10 / 4:3 / 满屏。实测框外 `tap 1400 30` 无任何指针事件。
+  比例可用 `session.sh --aspect 16:10` 覆盖。实测框外 `tap 1400 30` 无任何指针事件。
 
 ### 14.6 下一步（需要决策）
 

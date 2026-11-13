@@ -179,7 +179,7 @@ WindowServer: BKDirectTouchState → contacts → 应用指针事件
 - 活动框：`session.sh` 用 `system_profiler SPDisplaysDataType` 的 `UI Looks like: 1920 x 1080`
   得到 Mac 主显示器比例，`touchd.py` 在连接建立时下发 `#aspect 1.777778`；App 据此在
   屏幕上画居中的 16:9 框，**框外触摸不转发**、框内坐标线性映射到 Mac 全屏，两者比例
-  不同时也不会拉歪。长按 700 ms 可在 16:9 / 16:10 / 4:3 / 满屏间切换。
+  不同时也不会拉歪；要换比例用 `session.sh --aspect 16:10`。
 - 修正后的四角实测（2800×1752 画布，活动框 2800×1575，上下各留 88.5 px）：
   `tap 1400 200 → loc=960,1003.5`、`tap 1400 1600 → loc=960,43.5`、
   `tap 200 800 → loc=137,592`、`tap 2600 800 → loc=1783,592`；`tap 1400 30`
