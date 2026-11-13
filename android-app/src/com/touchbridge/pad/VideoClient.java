@@ -138,6 +138,9 @@ public final class VideoClient {
     private long appliedGen = -1;
     private Surface appliedSurface;
     private boolean needKey = true;
+    /** 呈现时间基准：把码流 pts 映射到本机 nanoTime，交给 SurfaceFlinger 定时上屏。 */
+    private long presBasePtsUs = -1;
+    private long presBaseNs = 0;
     private int debugFrames = 0;
     /** 是否已经渲染过至少一帧（用于首帧前把 SurfaceView 藏起来，避免绿屏/花屏闪现）。 */
     private volatile boolean rendered = false;
@@ -533,6 +536,10 @@ public final class VideoClient {
                     wantResync = false;
                     needKey = true;
                 }
+                if (f != null && !f.key && frames.size() > 2) {
+                    // 队列积压时丢掉非关键帧，避免越追越慢（只保留最新几帧）。
+                    f = null;
+                }
                 if (f != null && (!needKey || f.key)) {
                     if (debugFrames < 20) {
                         Log.i(TAG, "video feed #" + debugFrames + " key=" + f.key
@@ -625,6 +632,8 @@ public final class VideoClient {
         needKey = true;
         gotFrame = false;
         wantResync = false;
+        presBasePtsUs = -1;
+        presBaseNs = 0;
         // 新 codec 只能从 IDR 开始喂：保留已排队的 IDR（首帧常见情况），其余丢掉，
         // 同时立刻向桥请求一个关键帧，避免白等一个 GOP。
         frames.removeIf(f -> !f.key);
@@ -750,7 +759,11 @@ public final class VideoClient {
             boolean render = !config && !eos;
             try {
                 noteFrameForFps();
-                c.releaseOutputBuffer(out, render);
+                if (render) {
+                    c.releaseOutputBuffer(out, true);
+                } else {
+                    c.releaseOutputBuffer(out, false);
+                }
             } catch (Exception ignore) {
             }
             if (render) {

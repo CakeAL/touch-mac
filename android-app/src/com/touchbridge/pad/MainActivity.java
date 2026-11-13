@@ -217,6 +217,7 @@ public class MainActivity extends Activity {
         touch.setShowTouches(prefs.getBoolean("showTouches", false));
         touch.setFillScreen(prefs.getBoolean("fillScreen", true));
         video.setMuted(prefs.getBoolean("muteAudio", false));
+        link.setPrefRes(prefs.getInt("res", 1080));
 
         setContentView(root);
         link.start();
@@ -549,11 +550,15 @@ public class MainActivity extends Activity {
     static class Link extends Thread {
         /** 平板屏幕像素尺寸；每次连接时上报给桥，桥据此按比例决定编码尺寸。 */
         private final int[] screenPx;
+        /** 平板在设置里选的分辨率档位（1080/1440/2160），随屏幕尺寸一起上报。 */
+        private volatile int prefRes = 1080;
         private final java.util.concurrent.ArrayBlockingQueue<String> queue =
                 new java.util.concurrent.ArrayBlockingQueue<>(8192);
         Link(int[] screenPx) {
             this.screenPx = screenPx;
         }
+
+        void setPrefRes(int res) { prefRes = res; }
 
         private volatile Socket socket;
         private volatile OutputStream out;
@@ -595,7 +600,8 @@ public class MainActivity extends Activity {
                     Log.i(TAG, "link connected to " + HOST + ":" + PORT);
                     queue.clear();
                     if (screenPx != null) {
-                        queue.offer("s " + screenPx[0] + " " + screenPx[1] + "\n");
+                        queue.offer("s " + screenPx[0] + " " + screenPx[1] + " "
+                    + prefRes + "\n");
                     }
                     startReader(s);
                     startClockProbe();

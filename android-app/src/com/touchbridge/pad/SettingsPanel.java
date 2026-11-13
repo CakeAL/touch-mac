@@ -277,7 +277,9 @@ final class SettingsPanel {
         boolean showTouches = touchBox.isChecked();
         boolean lowLatency = lowLatBox.isChecked();
         boolean mute = !audioBox.isChecked();
+        int resH = RES_HEIGHTS[Math.max(0, resSpin.getSelectedItemPosition())];
         prefs.edit().putBoolean("showHud", showHud).putBoolean("showDelay", showDelay)
+                .putInt("res", resH)
                 .putBoolean("fillScreen", fill).putBoolean("showTouches", showTouches)
                 .putBoolean("muteAudio", mute).apply();
         surface.setShowHud(showHud);
@@ -287,10 +289,8 @@ final class SettingsPanel {
         video.setLowLatency(lowLatency);
         video.setMuted(mute);
 
-        String res = (String) resSpin.getSelectedItem();
         String fps = (String) fpsSpin.getSelectedItem();
         String mbps = (String) brSpin.getSelectedItem();
-        int resH = RES_HEIGHTS[Math.max(0, resSpin.getSelectedItemPosition())];
         int bitrate = Integer.parseInt(mbps) * 1000;
         boolean hevc = hevcBox.isChecked();
         boolean hdr = hdrBox.isChecked();

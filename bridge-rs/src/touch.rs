@@ -51,7 +51,7 @@ pub async fn serve(
     addr: SocketAddr,
     tx: mpsc::Sender<TouchEvent>,
     aspect: f32,
-    screen: tokio::sync::watch::Sender<(u32, u32)>,
+    screen: tokio::sync::watch::Sender<(u32, u32, u32)>,
     clients: tokio::sync::watch::Sender<usize>,
     idr: tokio::sync::watch::Sender<u64>,
 ) -> Result<()> {
@@ -85,7 +85,7 @@ async fn handle(
     sock: TcpStream,
     tx: mpsc::Sender<TouchEvent>,
     aspect: f32,
-    screen: tokio::sync::watch::Sender<(u32, u32)>,
+    screen: tokio::sync::watch::Sender<(u32, u32, u32)>,
     idr: tokio::sync::watch::Sender<u64>,
 ) -> Result<()> {
     let (rd, mut wr) = sock.into_split();
@@ -123,12 +123,13 @@ async fn handle(
                 } else if let Some(rest) = t.strip_prefix("s ") {
                     // 平板上报自己的屏幕尺寸（像素）：桥据此按比例决定编码尺寸。
                     let mut it = rest.split_whitespace();
-                    if let (Some(w), Some(h)) =
-                        (it.next().and_then(|v| v.parse().ok()), it.next().and_then(|v| v.parse().ok()))
-                    {
-                        if w > 0 && h > 0 && *screen.borrow() != (w, h) {
-                            let _ = screen.send((w, h));
-                            eprintln!("[touch] 平板屏幕 {w}x{h}");
+                    let w: Option<u32> = it.next().and_then(|v| v.parse().ok());
+                    let h: Option<u32> = it.next().and_then(|v| v.parse().ok());
+                    let r: u32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                    if let (Some(w), Some(h)) = (w, h) {
+                        if w > 0 && h > 0 && *screen.borrow() != (w, h, r) {
+                            let _ = screen.send((w, h, r));
+                            eprintln!("[touch] 平板屏幕 {w}x{h} 偏好 {r}p");
                         }
                     }
                 } else if t == "p" {

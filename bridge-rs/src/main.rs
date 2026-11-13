@@ -355,7 +355,7 @@ async fn main() -> Result<()> {
     let slot: CtlSlot = Arc::new(std::sync::Mutex::new(None));
     let (clients_tx, mut clients_rx) = watch::channel::<usize>(0);
     let (screen_tx, mut screen_rx) =
-        watch::channel::<(u32, u32)>((effective.screen_w, effective.screen_h));
+        watch::channel::<(u32, u32, u32)>((effective.screen_w, effective.screen_h, 0));
     let (idr_tx, mut idr_rx) = watch::channel::<u64>(0);
 
     {
@@ -413,16 +413,20 @@ async fn main() -> Result<()> {
         }
         if n > 0 && session.is_none() {
             // 平板连上后会先上报屏幕尺寸；等它一下（最多 800ms），否则按 16:9 算。
-            if screen_rx.borrow().0 == 0 {
+            if screen_rx.borrow().2 == 0 || screen_rx.borrow().0 == 0 {
                 let _ = tokio::time::timeout(Duration::from_millis(800), screen_rx.changed()).await;
             }
             let (stop_tx, stop_rx) = watch::channel(false);
             let mut a2 = a.clone();
+            let sc0 = *screen_rx.borrow();
+            if sc0.2 > 0 && sc0.2 != a2.res {
+                a2.res = sc0.2; // 平板在设置里选的档位优先于桥本地的旧值
+            }
             if a2.width == 0 || a2.height == 0 {
                 let sc = *screen_rx.borrow();
                 let (w, h) = settings::size_for(
                     a2.res,
-                    if sc.0 > 0 && sc.1 > 0 { Some(sc) } else { None },
+                    if sc.0 > 0 && sc.1 > 0 { Some((sc.0, sc.1)) } else { None },
                 );
                 a2.width = w;
                 a2.height = h;
