@@ -906,6 +906,15 @@ LCC 侧 10 s 无视频包即 `ML_ERROR_NO_VIDEO_TRAFFIC`。可以不解码（fak
 - `Desktop` 的 appid 是 `881448767`。
 - 设备创建有 `ready()` 轮询（≈1.15 s 上限），首次触摸可能早到而被丢弃。
 
+### 14.7 平板 App 路径（已实现，推荐）
+
+- `android-app/`：无 gradle 手工打包的最小 APK（`aapt2`/`javac`/`d8`/`apksigner`），
+  全屏采集 MotionEvent，按 `d/m/u/c` 文本行发给 `bridge/touchd.py`（`adb reverse tcp:47777`）。
+- `bridge/session.sh --net`：自动 `adb reverse` + 起 `touchd.py`，其余同普通会话。
+- 端口选 47777：macOS 的 ControlCenter 占用 TCP 7000。
+- 已用 `adb shell input tap/swipe` 端到端验证（d=3 m=118 u=3，坐标精确，
+  双指时 WindowServer 记录 contact 1 + contact 2 同时 touching）。
+
 ### 14.6 下一步（需要决策）
 
 1. **A（当前可用）**：Mac 端桥接 + `adb` 转发触控。平板不显示 Mac 画面，只当触控面；改动最小。

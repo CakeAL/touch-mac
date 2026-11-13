@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # 建立一次 Sunshine 会话，把平板触摸转发成 VoidLink 原生触控。
 #
-# 用法: ./session.sh [--appid N] [--no-tablet] [--rotate 0|90|180|270]
-#                    [--device /dev/input/event3] [--maxx N] [--maxy N]
+# 用法: ./session.sh [--appid N] [--no-tablet] [--net] [--port N]
+#                    [--rotate 0|90|180|270] [--device /dev/input/event3] [--maxx N] [--maxy N]
+#
+# 平板触控有两种接入方式：
+#   --net   平板装 android-app 的 TouchBridge（推荐，无需 root），经 adb reverse 连本机 TCP
+#   默认    adb exec-out getevent 直读 /dev/input/event3（无需装 App，但依赖 adb 权限）
 #
 # Ctrl-C 结束会话（会先发 CANCEL_ALL）。
 set -uo pipefail
@@ -18,6 +22,8 @@ ADB="${ADB:-adb}"
 
 APPID=881448767
 TABLET=1
+NET=0
+PORT=47777
 ROTATE=0
 DEVICE=/dev/input/event3
 MAXX=1751
@@ -26,6 +32,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --appid) APPID="$2"; shift 2 ;;
     --no-tablet) TABLET=0; shift ;;
+    --net) NET=1; shift ;;
+    --port) PORT="$2"; shift 2 ;;
     --rotate) ROTATE="$2"; shift 2 ;;
     --device) DEVICE="$2"; shift 2 ;;
     --maxx) MAXX="$2"; shift 2 ;;
@@ -36,6 +44,7 @@ done
 
 cleanup() {
   [[ -f "$PIDFILE" ]] && while read -r p; do kill "$p" 2>/dev/null; done < "$PIDFILE"
+  [[ "${NET:-0}" == "1" ]] && "$ADB" reverse --remove "tcp:${PORT:-7000}" >/dev/null 2>&1
   rm -f "$FIFO" "$PIDFILE"
   echo "[session] stopped" >&2
 }
@@ -68,9 +77,17 @@ echo $! >> "$PIDFILE"
 
 if [[ "$TABLET" == "1" ]]; then
   sleep 1.5   # 等会话建立
-  python3 "$HERE/tablet_touch.py" --adb "$ADB" --device "$DEVICE" \
-      --maxx "$MAXX" --maxy "$MAXY" --rotate "$ROTATE" --out "$FIFO" >/tmp/touchbridge-tablet.log 2>&1 &
-  echo $! >> "$PIDFILE"
+  if [[ "$NET" == "1" ]]; then
+    "$ADB" reverse "tcp:$PORT" "tcp:$PORT" >/dev/null 2>&1 \
+      || echo "[session] adb reverse 失败，请确认平板已连接并授权" >&2
+    python3 "$HERE/touchd.py" --port "$PORT" --fifo "$FIFO" >/tmp/touchbridge-touchd.log 2>&1 &
+    echo $! >> "$PIDFILE"
+    echo "[session] 平板 App: adb reverse tcp:$PORT 已建立，打开 TouchBridge 即可" >&2
+  else
+    python3 "$HERE/tablet_touch.py" --adb "$ADB" --device "$DEVICE" \
+        --maxx "$MAXX" --maxy "$MAXY" --rotate "$ROTATE" --out "$FIFO" >/tmp/touchbridge-tablet.log 2>&1 &
+    echo $! >> "$PIDFILE"
+  fi
 fi
 
 echo "[session] running. Ctrl-C to stop." >&2

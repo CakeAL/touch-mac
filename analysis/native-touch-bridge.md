@@ -151,9 +151,42 @@ grep -E "begin touch packet|Dropping malformed|verify tag" ~/.config/sunshine/su
 
 ---
 
-## 7. 尚未完成
+## 7. 平板 App 路径（无 root，推荐）
 
-- 真机手指经 `adb getevent` 的端到端验证（需有人在平板上触摸）。
+`android-app/` 是一个不依赖 gradle 的最小 APK（`aapt2` + `javac` + `d8` + `apksigner` 手工打包）：
+
+```text
+平板 TouchBridge App (MotionEvent)
+    ↓ TCP 127.0.0.1:47777  （adb reverse tcp:47777 tcp:47777）
+Mac bridge/touchd.py            文本行协议 d/m/u/c
+    ↓ FIFO /tmp/touchpipe
+bridge/client (moonlight-common-c)
+    ↓ SS_TOUCH_PACKET → control stream (UDP 47999)
+Sunshine → libvirtualhid → VoidLink HID Touchscreen
+    ↓
+WindowServer: BKDirectTouchState → contacts → 应用指针事件
+```
+
+- 选 47777 而不是 7000：macOS 的 ControlCenter 占着 TCP 7000（AirPlay 接收），
+  `adb reverse` 会把平板连接打到 ControlCenter 上。
+- 平板 App 的 socket 写必须在独立线程：`onTouchEvent` 在主线程，
+  直接写 socket 会抛 `NetworkOnMainThreadException`（第一版实现踩过，表现为
+  “连上即断 + write failed”）。
+- 坐标：平板 `x / width`、`1 - y / height`；实测映射精确（`input tap 900 900`
+  → Mac `loc=617,555`，与 1920×1080 全屏窗口一致）。
+
+已用 `adb shell input tap/swipe` 端到端验证（不经人手）：
+`touchd` 统计 `d=3 m=118 u=3`，应用收到 3 组 MOUSEDOWN→MOUSEDRAG→MOUSEUP，
+坐标与预期完全一致；双指注入时 WindowServer 记录 `contact 1` 与 `contact 2`
+同时 `presence: touching`。
+
+## 8. 尚未完成
+
+- 真机手指在本 App 上的验收（需有人在平板上触摸；`adb shell input` 已覆盖等价链路）。
 - 平板侧视频：本方案里会话被 Mac 端桥接占用，平板看不到 Mac 画面；
   若要“平板显示 + 触控”，需改用带触摸转发的客户端（改 Moonlight Android 客户端，服务端不动）。
-- 多点手势（捏合/旋转）若必须支持，只能走应用自绘或私有 API，本路径不支持（INFERRED）。
+- **多点语义分歧（UNVERIFIED）**：本机实测 WindowServer 收到 2 个 contact、
+  但 `touchwatch`（`acceptsTouchEvents=YES`、`allowedTouchTypes` 含 Direct）
+  只在 `NSEventTypeGesture`(subtype 63) 里拿到 0 个 touch，应用层只有单指针。
+  用户表示此前用“Moonlight 多点触控版”在平板上验证过多点触控，二者矛盾，
+  需按当时的客户端版本/App 复测后才能定论。

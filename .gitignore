@@ -39,3 +39,7 @@ probe/svcprop
 # 桥接客户端编译产物
 bridge/client
 bridge/touchwatch
+
+# 平板 App 构建产物
+android-app/build/
+android-app/debug.keystore
