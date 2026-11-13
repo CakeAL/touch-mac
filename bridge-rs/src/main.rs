@@ -29,6 +29,8 @@ use touch::TouchEvent;
 struct Args {
     host: String,
     appid: String,
+    /// 分辨率档位（1080/1440/2160）；width/height 为 0 时按屏幕比例自动算。
+    res: u32,
     width: u32,
     height: u32,
     fps: u32,
@@ -50,15 +52,16 @@ fn parse_args() -> Result<Args> {
     let mut a = Args {
         host: "127.0.0.1".into(),
         appid: "881448767".into(),
-        width: st.width,
-        height: st.height,
+        res: st.res,
+        width: 0,
+        height: 0,
         fps: st.fps,
         bitrate: st.bitrate,
         cert: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/certs/client.crt")),
         key: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/certs/client.key")),
         touch: "127.0.0.1:47777".parse().unwrap(),
         relay: "127.0.0.1:47779".parse().unwrap(),
-        aspect: 16.0 / 9.0,
+        aspect: st.width as f32 / st.height as f32,
         no_cancel: false,
         hevc: st.hevc,
         hdr: st.hdr,
@@ -76,6 +79,7 @@ fn parse_args() -> Result<Args> {
         match k {
             "--host" => a.host = next(),
             "--appid" => a.appid = next(),
+            "--res" => a.res = next().parse()?,
             "--width" => a.width = next().parse()?,
             "--height" => a.height = next().parse()?,
             "--fps" => a.fps = next().parse()?,
@@ -318,7 +322,11 @@ async fn run_session(
 #[tokio::main]
 async fn main() -> Result<()> {
     let a = parse_args()?;
+    let st = settings::Settings::load();
     let effective = settings::Settings {
+        res: a.res,
+        screen_w: st.screen_w,
+        screen_h: st.screen_h,
         width: a.width,
         height: a.height,
         fps: a.fps,
@@ -343,6 +351,8 @@ async fn main() -> Result<()> {
     let (cfg_tx, cfg_rx) = watch::channel::<Option<Arc<Bytes>>>(None);
     let slot: CtlSlot = Arc::new(std::sync::Mutex::new(None));
     let (clients_tx, mut clients_rx) = watch::channel::<usize>(0);
+    let (screen_tx, mut screen_rx) =
+        watch::channel::<(u32, u32)>((effective.screen_w, effective.screen_h));
     let (idr_tx, mut idr_rx) = watch::channel::<u64>(0);
 
     {
@@ -371,7 +381,9 @@ async fn main() -> Result<()> {
         let aspect = a.aspect;
         let touch_addr = a.touch;
         tokio::spawn(async move {
-            if let Err(e) = touch::serve(touch_addr, ttx, aspect, clients_tx, idr_tx).await {
+            if let Err(e) =
+                touch::serve(touch_addr, ttx, aspect, screen_tx, clients_tx, idr_tx).await
+            {
                 eprintln!("[touch] 退出: {e}");
             }
         });
@@ -397,8 +409,25 @@ async fn main() -> Result<()> {
             eprintln!("[main] 会话已结束，回到待机");
         }
         if n > 0 && session.is_none() {
+            // 平板连上后会先上报屏幕尺寸；等它一下（最多 800ms），否则按 16:9 算。
+            if screen_rx.borrow().0 == 0 {
+                let _ = tokio::time::timeout(Duration::from_millis(800), screen_rx.changed()).await;
+            }
             let (stop_tx, stop_rx) = watch::channel(false);
-            let a2 = a.clone();
+            let mut a2 = a.clone();
+            if a2.width == 0 || a2.height == 0 {
+                let sc = *screen_rx.borrow();
+                let (w, h) = settings::size_for(
+                    a2.res,
+                    if sc.0 > 0 && sc.1 > 0 { Some(sc) } else { None },
+                );
+                a2.width = w;
+                a2.height = h;
+            }
+            eprintln!(
+                "[main] 编码尺寸 {}x{}（档位 {}p，平板屏幕 {}x{}）",
+                a2.width, a2.height, a2.res, screen_rx.borrow().0, screen_rx.borrow().1
+            );
             let (vtx2, atx2, cfg2, slot2) = (vtx.clone(), atx.clone(), cfg_tx.clone(), slot.clone());
             let h = tokio::spawn(async move {
                 if let Err(e) = run_session(a2, vtx2, atx2, cfg2, slot2, stop_rx).await {

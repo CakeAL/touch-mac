@@ -97,13 +97,19 @@ bridge-rs/run.sh -d       # 后台常驻（日志 /tmp/touchbridge.log）
 
 ## 参数与设置
 
-平板右上角 **⚙** 打开设置面板，可改：分辨率（1280x720 / 1920x1080 / 2560x1440）、帧率（30/60/90/120）、码率（10–80 Mbps）、HEVC、HDR/10-bit、串流音频、左上角延时显示。点「应用并重连」后桥会 `exec` 一个新进程重启会话（约 1 秒断线）。
+平板右上角 **⚙** 打开设置面板：
+
+- **分辨率**只选档位：`1080p / 2K / 4K`。实际编码宽度由桥按**平板屏幕比例**自动算（例如 1080p + 2800×1752 的平板 → 1726×1080），所以画面原生就是平板比例，不需要拉伸，也不会有黑边。
+- 帧率（30/60/90/120）、码率（10–80 Mbps）、HEVC、HDR/10-bit、串流音频。
+- 客户端开关：**画面铺满平板**（关掉则按比例留边）、**显示左上角调试信息**、**显示触点圆圈**。
+
+点「应用并重连」后桥会 `exec` 一个新进程重启会话（约 1 秒断线）。
 
 设置也直接存在 `~/.config/touchbridge/settings`：
 
 ```ini
-width=1920
-height=1080
+res=1080          # 档位高度：1080 / 1440 / 2160（也接受 1080p / 2k / 4k）
+screen=2800x1752  # 平板屏幕像素；App 连上时会自动上报并覆盖
 fps=60
 bitrate=40000
 hevc=1
@@ -111,12 +117,12 @@ hdr=0
 audio=1
 ```
 
-桥的命令行参数（都会覆盖文件）：`--width --height --fps --bitrate --hevc/--no-hevc --hdr/--no-hdr --audio/--no-audio`。
+桥的命令行参数（都会覆盖文件）：`--res --width --height --fps --bitrate --hevc/--no-hevc --hdr/--no-hdr --audio/--no-audio`。其中 `--width/--height` 一般不用给，留空即按 `res × 屏幕比例` 自动算。
 
 设置口协议（`127.0.0.1:47781`，行协议）：
 
 ```
-get                → #cfg width=1920 height=1080 fps=60 ...
+get                → #cfg res=1080 screen=2800x1752 ... size=1726x1080
 set fps=120        → #ok
 apply              → #applied（桥保存设置并重启自己）
 ```
@@ -132,6 +138,7 @@ apply              → #applied（桥保存设置并重启自己）
 | `i` | 请求关键帧 |
 | `p` | 时钟探测 → `#pong <us>` |
 | `h` | 心跳 → `#hb <us>` |
+| `s <w> <h>` | 上报平板屏幕像素，桥据此决定编码宽高 |
 | — | 服务端下发 `#aspect <ratio>` 与 `#t0 <us>` |
 
 `47779`（视频/音频，二进制）：`u8 type + u32 BE len + payload`，`type` 为 `0x01` 参数集（`u8 codec` + Annex-B SPS/PPS）、`0x02` 视频帧（`u64 BE pts | u8 flags | u64 BE send_us | AU`）、`0x03` 音频（`u64 pts | PCM s16le 48k 立体声`）、`0x04` 时钟 tick。

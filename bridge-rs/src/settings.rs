@@ -6,6 +6,11 @@ use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub struct Settings {
+    /// 分辨率档位（按高度）：1080 / 1440 / 2160。实际宽度由屏幕比例自动算。
+    pub res: u32,
+    /// 平板屏幕尺寸（像素），由 App 连上来时上报；未知时按 16:9。
+    pub screen_w: u32,
+    pub screen_h: u32,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -17,7 +22,18 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { width: 1920, height: 1080, fps: 60, bitrate: 40000, hevc: true, hdr: true, audio: true }
+        Settings {
+            res: 1080,
+            screen_w: 0,
+            screen_h: 0,
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate: 40000,
+            hevc: true,
+            hdr: false,
+            audio: true,
+        }
     }
 }
 
@@ -44,6 +60,21 @@ impl Settings {
         s
     }
 
+    /// 按「档位高度 + 屏幕比例」算出实际编码尺寸（宽度取偶数）。
+    pub fn size(&self) -> (u32, u32) {
+        size_for(self.res, if self.screen_w > 0 && self.screen_h > 0 {
+            Some((self.screen_w, self.screen_h))
+        } else {
+            None
+        })
+    }
+
+    pub fn apply_size(&mut self) {
+        let (w, h) = self.size();
+        self.width = w;
+        self.height = h;
+    }
+
     pub fn save(&self) -> std::io::Result<()> {
         let p = path();
         if let Some(dir) = p.parent() {
@@ -54,9 +85,10 @@ impl Settings {
 
     pub fn to_text(&self) -> String {
         format!(
-            "width={}\nheight={}\nfps={}\nbitrate={}\nhevc={}\nhdr={}\naudio={}\n",
-            self.width,
-            self.height,
+            "res={}\nscreen={}x{}\nfps={}\nbitrate={}\nhevc={}\nhdr={}\naudio={}\n",
+            self.res,
+            self.screen_w,
+            self.screen_h,
             self.fps,
             self.bitrate,
             if self.hevc { 1 } else { 0 },
@@ -66,12 +98,26 @@ impl Settings {
     }
 
     pub fn one_line(&self) -> String {
-        self.to_text().trim().replace('\n', " ")
+        let (w, h) = self.size();
+        format!("{} size={w}x{h}", self.to_text().trim().replace('\n', " "))
     }
 
     /// 接受 `width=1920` 这类单个键值；返回是否为已知键。
     pub fn set(&mut self, k: &str, v: &str) -> bool {
         match k {
+            "res" => match parse_res(v) {
+                Some(r) => { self.res = r; self.apply_size(); true }
+                None => false,
+            },
+            "screen" => match v.split_once('x').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))) {
+                Some((w, h)) if w > 0 && h > 0 => {
+                    self.screen_w = w;
+                    self.screen_h = h;
+                    self.apply_size();
+                    true
+                }
+                _ => false,
+            },
             "width" => match v.parse() {
                 Ok(n) => { self.width = n; true }
                 Err(_) => false,
@@ -97,9 +143,11 @@ impl Settings {
 
     /// 供 exec 用的命令行参数（保持既有 CLI 形式）。
     pub fn argv(&self) -> Vec<String> {
+        let (w, h) = self.size();
         vec![
-            "--width".into(), self.width.to_string(),
-            "--height".into(), self.height.to_string(),
+            "--res".into(), self.res.to_string(),
+            "--width".into(), w.to_string(),
+            "--height".into(), h.to_string(),
             "--fps".into(), self.fps.to_string(),
             "--bitrate".into(), self.bitrate.to_string(),
             "--hevc".into(), if self.hevc { "1".into() } else { "0".into() },
@@ -107,4 +155,27 @@ impl Settings {
             "--audio".into(), if self.audio { "1".into() } else { "0".into() },
         ]
     }
+}
+
+/// `1080` / `1080p` / `2k` / `2K` / `4k` 都接受；返回的是「高度档位」。
+pub fn parse_res(v: &str) -> Option<u32> {
+    let t = v.trim().to_ascii_lowercase();
+    let t = t.trim_end_matches('p');
+    match t {
+        "1080" | "fhd" => Some(1080),
+        "1440" | "2k" | "qhd" => Some(1440),
+        "2160" | "4k" | "uhd" => Some(2160),
+        _ => t.parse::<u32>().ok().filter(|n| *n >= 480 && *n <= 4320),
+    }
+}
+
+/// 给定档位高度与屏幕比例，算出编码尺寸；宽度补成偶数（编码器要求）。
+pub fn size_for(res: u32, screen: Option<(u32, u32)>) -> (u32, u32) {
+    let res = if res == 0 { 1080 } else { res };
+    let aspect = match screen {
+        Some((w, h)) if w > 0 && h > 0 => w as f64 / h as f64,
+        _ => 16.0 / 9.0,
+    };
+    let w = (res as f64 * aspect).round() as u32;
+    ((w + 1) & !1, res)
 }

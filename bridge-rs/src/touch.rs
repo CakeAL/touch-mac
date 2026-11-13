@@ -51,6 +51,7 @@ pub async fn serve(
     addr: SocketAddr,
     tx: mpsc::Sender<TouchEvent>,
     aspect: f32,
+    screen: tokio::sync::watch::Sender<(u32, u32)>,
     clients: tokio::sync::watch::Sender<usize>,
     idr: tokio::sync::watch::Sender<u64>,
 ) -> Result<()> {
@@ -68,9 +69,10 @@ pub async fn serve(
         let tx = tx.clone();
         let cl = clients.clone();
         let idr = idr.clone();
+        let scr = screen.clone();
         cl.send_modify(|n| *n += 1);
         tokio::spawn(async move {
-            if let Err(e) = handle(sock, tx, aspect, idr).await {
+            if let Err(e) = handle(sock, tx, aspect, scr, idr).await {
                 eprintln!("[touch] {peer}: {e}");
             }
             cl.send_modify(|n| *n = n.saturating_sub(1));
@@ -83,6 +85,7 @@ async fn handle(
     sock: TcpStream,
     tx: mpsc::Sender<TouchEvent>,
     aspect: f32,
+    screen: tokio::sync::watch::Sender<(u32, u32)>,
     idr: tokio::sync::watch::Sender<u64>,
 ) -> Result<()> {
     let (rd, mut wr) = sock.into_split();
@@ -117,6 +120,17 @@ async fn handle(
                 } else if t == "i" {
                     // 平板解码端丢了参考帧（队列溢出/清空），请桥立刻要一个 IDR。
                     idr.send_modify(|n| *n += 1);
+                } else if let Some(rest) = t.strip_prefix("s ") {
+                    // 平板上报自己的屏幕尺寸（像素）：桥据此按比例决定编码尺寸。
+                    let mut it = rest.split_whitespace();
+                    if let (Some(w), Some(h)) =
+                        (it.next().and_then(|v| v.parse().ok()), it.next().and_then(|v| v.parse().ok()))
+                    {
+                        if w > 0 && h > 0 && *screen.borrow() != (w, h) {
+                            let _ = screen.send((w, h));
+                            eprintln!("[touch] 平板屏幕 {w}x{h}");
+                        }
+                    }
                 } else if t == "p" {
                     // 时钟校准：平板发来 p，回 bridge 当前单调微秒。
                     let _ = wr

@@ -124,13 +124,20 @@ public class MainActivity extends Activity {
         super.onPause();
     }
 
+    /** 当前屏幕像素尺寸（用于告诉桥按什么比例编码）。 */
+    int[] screenSize() {
+        android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
+        getWindowManager().getDefaultDisplay().getRealMetrics(dm);
+        return new int[]{dm.widthPixels, dm.heightPixels};
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         requestHighRefresh();
 
-        link = new Link();
+        link = new Link(screenSize());
         video = new VideoClient();
         video.setBridgeClock(() -> link.bridgeNowUs());
         video.setStateListener(s -> {
@@ -197,6 +204,9 @@ public class MainActivity extends Activity {
         // 本地开关（延时显示 / 静音）在启动时按上次的选择恢复
         android.content.SharedPreferences prefs = getSharedPreferences("touchbridge", MODE_PRIVATE);
         touch.setShowDelay(prefs.getBoolean("showDelay", true));
+        touch.setShowHud(prefs.getBoolean("showHud", true));
+        touch.setShowTouches(prefs.getBoolean("showTouches", false));
+        touch.setFillScreen(prefs.getBoolean("fillScreen", true));
         video.setMuted(prefs.getBoolean("muteAudio", false));
 
         setContentView(root);
@@ -293,6 +303,12 @@ public class MainActivity extends Activity {
         private final RectF area = new RectF();
         private float targetAspect = 16f / 9f;
         private boolean aspectFromHost = false;
+        /** 铺满平板：忽略主机宽高比，画面拉伸填满整块屏。 */
+        private boolean fillScreen = true;
+        /** 左上角调试信息（状态行）是否显示。 */
+        private boolean showHud = true;
+        /** 是否画触点圆圈（关掉后触控仍然工作，只是没有视觉反馈）。 */
+        private boolean showTouches = false;
 
         TouchSurface(Context c, Link link, VideoClient video) {
             super(c);
@@ -346,7 +362,7 @@ public class MainActivity extends Activity {
 
         private void recomputeArea() {
             int w = Math.max(1, getWidth()), h = Math.max(1, getHeight());
-            if (targetAspect <= 0f) {
+            if (fillScreen || targetAspect <= 0f) {
                 area.set(0, 0, w, h);
             } else {
                 float fw = w, fh = fw / targetAspect;
@@ -383,7 +399,7 @@ public class MainActivity extends Activity {
                 canvas.drawText(msg, cx - tw / 2f, cy, waiting);
             }
 
-            for (int i = 0; i < active.size(); i++) {
+            for (int i = 0; showTouches && i < active.size(); i++) {
                 float[] p = active.valueAt(i);
                 float cx = area.left + p[0] * area.width();
                 float cy = area.top + p[1] * area.height();
@@ -391,6 +407,7 @@ public class MainActivity extends Activity {
                 canvas.drawCircle(cx, cy, 24f, dot);
             }
 
+            if (showHud) {
             float tx = area.left + 36f, ty = area.top + 56f;
             // 状态区压在视频上会看不清，垫一层半透明底。
             float boxRight = tx + Math.max(text.measureText(link.statusText()),
@@ -402,9 +419,29 @@ public class MainActivity extends Activity {
             canvas.drawText(video == null ? "video: off" : video.statusText(), tx, ty + 44f, text);
             canvas.drawText(String.format(Locale.US, "touching: %d   frame: %s   %s",
                     active.size(), aspectLabel(), latencyLabel()), tx, ty + 88f, text);
-            canvas.drawText("只有框内区域会转发触摸", tx, ty + 132f, hint);
+            canvas.drawText(fillScreen ? "画面已铺满（可在设置里改回等比）" : "只有框内区域会转发触摸", tx, ty + 132f, hint);
+            }
 
             if (active.size() > 0 || !playing) postInvalidateOnAnimation();
+        }
+
+        void setFillScreen(boolean on) {
+            if (fillScreen == on) return;
+            fillScreen = on;
+            recomputeArea();
+            postInvalidateOnAnimation();
+        }
+
+        void setShowTouches(boolean on) {
+            if (showTouches == on) return;
+            showTouches = on;
+            postInvalidateOnAnimation();
+        }
+
+        void setShowHud(boolean on) {
+            if (showHud == on) return;
+            showHud = on;
+            postInvalidateOnAnimation();
         }
 
         void setShowDelay(boolean on) {
@@ -425,6 +462,7 @@ public class MainActivity extends Activity {
         }
 
         private String aspectLabel() {
+            if (fillScreen) return "铺满";
             if (aspectFromHost) return String.format(Locale.US, "%.3f (host)", targetAspect);
             return String.format(Locale.US, "%.3f", targetAspect);
         }
@@ -500,8 +538,14 @@ public class MainActivity extends Activity {
 
     /** 到 Mac 的 TCP 连接：写队列 + 独立线程发送（触控回调在主线程，不能直接写 socket）。 */
     static class Link extends Thread {
+        /** 平板屏幕像素尺寸；每次连接时上报给桥，桥据此按比例决定编码尺寸。 */
+        private final int[] screenPx;
         private final java.util.concurrent.ArrayBlockingQueue<String> queue =
                 new java.util.concurrent.ArrayBlockingQueue<>(8192);
+        Link(int[] screenPx) {
+            this.screenPx = screenPx;
+        }
+
         private volatile Socket socket;
         private volatile OutputStream out;
         private volatile boolean running = true;
@@ -541,6 +585,9 @@ public class MainActivity extends Activity {
                     state = "connected";
                     Log.i(TAG, "link connected to " + HOST + ":" + PORT);
                     queue.clear();
+                    if (screenPx != null) {
+                        queue.offer("s " + screenPx[0] + " " + screenPx[1] + "\n");
+                    }
                     startReader(s);
                     startClockProbe();
 

@@ -42,7 +42,9 @@ final class SettingsPanel {
     private static final String TAG = "TouchBridge";
     private static final int CFG_PORT = 47781;
 
-    private static final String[] RESOLUTIONS = {"1280x720", "1920x1080", "2560x1440"};
+    /** 分辨率只选档位，具体宽高由桥按平板屏幕比例算。 */
+    private static final String[] RESOLUTIONS = {"1080p", "2K", "4K"};
+    private static final int[] RES_HEIGHTS = {1080, 1440, 2160};
     private static final String[] RATES = {"30", "60", "90", "120"};
     private static final String[] BITRATES = {"10", "20", "30", "40", "60", "80"};
 
@@ -51,17 +53,24 @@ final class SettingsPanel {
     private final VideoClient video;
     private final MainActivity.TouchSurface surface;
     private final SharedPreferences prefs;
+    private final MainActivity host;
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     private LinearLayout panel;
     private Spinner resSpin, fpsSpin, brSpin;
-    private CheckBox hevcBox, hdrBox, audioBox, delayBox;
+    private CheckBox hevcBox, hdrBox, audioBox, delayBox, hudBox, fillBox, touchBox;
     private TextView status;
 
-    private int curW = 1920, curH = 1080, curFps = 120, curBr = 40000;
+    private int curRes = 1080, curFps = 60, curBr = 40000;
+    private String sizeText = null;
+    private int screenW, screenH;
 
     SettingsPanel(Activity act, FrameLayout root, VideoClient video, MainActivity.TouchSurface surface) {
         this.act = act;
+        this.host = (MainActivity) act;
+        int[] sc = host.screenSize();
+        this.screenW = sc[0];
+        this.screenH = sc[1];
         this.root = root;
         this.video = video;
         this.surface = surface;
@@ -97,7 +106,10 @@ final class SettingsPanel {
         hevcBox = addCheck("HEVC 编码", true);
         hdrBox = addCheck("HDR / 10-bit（偶发绿屏时关闭）", true);
         audioBox = addCheck("串流音频", true);
-        delayBox = addCheck("左上角显示延时", prefs.getBoolean("showDelay", true));
+        hudBox = addCheck("显示左上角调试信息", prefs.getBoolean("showHud", true));
+        delayBox = addCheck("  其中显示延时数字", prefs.getBoolean("showDelay", true));
+        fillBox = addCheck("画面铺满平板（轻微拉伸）", prefs.getBoolean("fillScreen", true));
+        touchBox = addCheck("显示触点圆圈", prefs.getBoolean("showTouches", false));
 
         LinearLayout buttons = new LinearLayout(act);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
@@ -182,7 +194,10 @@ final class SettingsPanel {
         });
         scroll.setVisibility(View.VISIBLE);
         scroll.bringToFront();
+        hudBox.setChecked(prefs.getBoolean("showHud", true));
         delayBox.setChecked(prefs.getBoolean("showDelay", true));
+        fillBox.setChecked(prefs.getBoolean("fillScreen", true));
+        touchBox.setChecked(prefs.getBoolean("showTouches", false));
         audioBox.setChecked(!prefs.getBoolean("muteAudio", false));
         status.setText("读取桥参数…");
         new Thread(this::fetchCfg, "settings-fetch").start();
@@ -204,7 +219,8 @@ final class SettingsPanel {
             if (line != null && line.startsWith("#cfg ")) {
                 parseCfg(line.substring(5));
                 ui.post(() -> status.setText(String.format(Locale.US,
-                        "桥当前：%dx%d @ %d fps，%d Mbps", curW, curH, curFps, curBr / 1000)));
+                        "桥当前：%s @ %d fps，%d Mbps",
+                        sizeText == null ? "自动" : sizeText, curFps, curBr / 1000)));
                 return;
             }
         } catch (Exception e) {
@@ -222,8 +238,8 @@ final class SettingsPanel {
             ui.post(() -> {
                 try {
                     switch (k) {
-                        case "width": curW = Integer.parseInt(v); break;
-                        case "height": curH = Integer.parseInt(v); break;
+                        case "res": curRes = Integer.parseInt(v); break;
+                        case "size": sizeText = v; break;
                         case "fps": curFps = Integer.parseInt(v); fpsSpin.setSelection(indexOf(RATES, v)); break;
                         case "bitrate": curBr = Integer.parseInt(v);
                             brSpin.setSelection(indexOf(BITRATES, String.valueOf(curBr / 1000))); break;
@@ -237,8 +253,12 @@ final class SettingsPanel {
             });
         }
         ui.post(() -> {
-            String res = curW + "x" + curH;
-            resSpin.setSelection(indexOf(RESOLUTIONS, res));
+            for (int i = 0; i < RES_HEIGHTS.length; i++) {
+                if (RES_HEIGHTS[i] == curRes) resSpin.setSelection(i);
+            }
+            if (sizeText != null) {
+                status.setText("桥当前: " + sizeText + " @ " + curFps + " fps, " + (curBr / 1000) + " Mbps");
+            }
         });
     }
 
@@ -249,18 +269,24 @@ final class SettingsPanel {
 
     private void apply() {
         // 客户端开关先落地（不需要重启会话）
+        boolean showHud = hudBox.isChecked();
         boolean showDelay = delayBox.isChecked();
+        boolean fill = fillBox.isChecked();
+        boolean showTouches = touchBox.isChecked();
         boolean mute = !audioBox.isChecked();
-        prefs.edit().putBoolean("showDelay", showDelay).putBoolean("muteAudio", mute).apply();
+        prefs.edit().putBoolean("showHud", showHud).putBoolean("showDelay", showDelay)
+                .putBoolean("fillScreen", fill).putBoolean("showTouches", showTouches)
+                .putBoolean("muteAudio", mute).apply();
+        surface.setShowHud(showHud);
         surface.setShowDelay(showDelay);
+        surface.setFillScreen(fill);
+        surface.setShowTouches(showTouches);
         video.setMuted(mute);
 
         String res = (String) resSpin.getSelectedItem();
         String fps = (String) fpsSpin.getSelectedItem();
         String mbps = (String) brSpin.getSelectedItem();
-        String[] wh = res.split("x");
-        int width = Integer.parseInt(wh[0]);
-        int height = Integer.parseInt(wh[1]);
+        int resH = RES_HEIGHTS[Math.max(0, resSpin.getSelectedItemPosition())];
         int bitrate = Integer.parseInt(mbps) * 1000;
         boolean hevc = hevcBox.isChecked();
         boolean hdr = hdrBox.isChecked();
@@ -268,7 +294,7 @@ final class SettingsPanel {
 
         status.setText("正在应用…");
         new Thread(() -> {
-            boolean ok = push(width, height, Integer.parseInt(fps), bitrate, hevc, hdr, audio);
+            boolean ok = push(resH, Integer.parseInt(fps), bitrate, hevc, hdr, audio, screenW, screenH);
             ui.post(() -> {
                 if (ok) {
                     hide();
@@ -280,7 +306,8 @@ final class SettingsPanel {
         }, "settings-apply").start();
     }
 
-    private boolean push(int w, int h, int fps, int bitrate, boolean hevc, boolean hdr, boolean audio) {
+    private boolean push(int resH, int fps, int bitrate, boolean hevc, boolean hdr, boolean audio,
+                         int screenW, int screenH) {
         try (Socket s = new Socket()) {
             s.setTcpNoDelay(true);
             s.connect(new InetSocketAddress("127.0.0.1", CFG_PORT), 1500);
@@ -288,8 +315,8 @@ final class SettingsPanel {
             OutputStreamWriter wr = new OutputStreamWriter(s.getOutputStream(), "US-ASCII");
             br.readLine(); // #cfg 欢迎行
             String[] lines = {
-                    "set width=" + w,
-                    "set height=" + h,
+                    "set res=" + resH,
+                    "set screen=" + screenW + "x" + screenH,
                     "set fps=" + fps,
                     "set bitrate=" + bitrate,
                     "set hevc=" + (hevc ? "1" : "0"),
