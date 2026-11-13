@@ -71,9 +71,15 @@ public final class VideoClient {
     private final java.util.ArrayDeque<Long> inflightFeedUs = new java.util.ArrayDeque<>();
     /** 桥的单调时钟（微秒），用于算网络/解码/合成各段延时。 */
     private volatile java.util.function.LongSupplier bridgeClock;
+    private volatile Runnable idrRequester;
     private long statRecvSum, statRecvN, statTotSum, statTotN, statDecSum, statDecN;
     private long audioNetSum, audioNetN;
+    private int audioPeak, audioPkCount;
     private int tickN;
+
+    void setIdrRequester(Runnable r) {
+        idrRequester = r;
+    }
 
     void setBridgeClock(java.util.function.LongSupplier c) {
         bridgeClock = c;
@@ -307,6 +313,17 @@ public final class VideoClient {
                 }
             }
         }
+        int pk = 0;
+        for (int i = 8; i + 1 < payload.length; i += 2) {
+            int v = (short) ((payload[i] & 0xff) | (payload[i + 1] << 8));
+            pk = Math.max(pk, Math.abs(v));
+        }
+        audioPeak = Math.max(audioPeak, pk);
+        if (++audioPkCount >= 200) {
+            Log.i(TAG, "audio peak " + audioPeak + " / " + audioPkCount + " pkts");
+            audioPeak = 0;
+            audioPkCount = 0;
+        }
         byte[] pcm = new byte[payload.length - 8];
         System.arraycopy(payload, 8, pcm, 0, pcm.length);
         AudioPlayer a = audio;
@@ -402,7 +419,9 @@ public final class VideoClient {
             frames.clear();
             wantResync = true;
             frames.offer(new Frame(au, pts, key, sendUs));
-            Log.w(TAG, "video queue overflow, dropped backlog, resync at next IDR");
+            Runnable r = idrRequester;
+            if (r != null) r.run();
+            Log.w(TAG, "video queue overflow, dropped backlog, requested IDR");
         }
     }
 

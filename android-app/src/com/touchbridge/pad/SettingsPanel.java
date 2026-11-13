@@ -55,7 +55,7 @@ final class SettingsPanel {
 
     private LinearLayout panel;
     private Spinner resSpin, fpsSpin, brSpin;
-    private CheckBox hevcBox, audioBox, delayBox;
+    private CheckBox hevcBox, hdrBox, audioBox, delayBox;
     private TextView status;
 
     private int curW = 1920, curH = 1080, curFps = 120, curBr = 40000;
@@ -80,7 +80,7 @@ final class SettingsPanel {
         TextView title = new TextView(act);
         title.setText("设置");
         title.setTextColor(Color.WHITE);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
         title.setPadding(0, 0, 0, dp(8));
         panel.addView(title);
 
@@ -94,7 +94,8 @@ final class SettingsPanel {
         fpsSpin = addRow("帧率 (fps)", RATES);
         brSpin = addRow("码率 (Mbps)", BITRATES);
 
-        hevcBox = addCheck("HEVC（10-bit）", true);
+        hevcBox = addCheck("HEVC 编码", true);
+        hdrBox = addCheck("HDR / 10-bit（偶发绿屏时关闭）", true);
         audioBox = addCheck("串流音频", true);
         delayBox = addCheck("左上角显示延时", prefs.getBoolean("showDelay", true));
 
@@ -118,7 +119,7 @@ final class SettingsPanel {
         ScrollView sv = new ScrollView(act);
         sv.addView(panel);
 
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(480), dp(420));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(520), dp(560));
         lp.gravity = Gravity.CENTER;
         root.addView(sv, lp);
         this.scroll = sv;
@@ -227,6 +228,7 @@ final class SettingsPanel {
                         case "bitrate": curBr = Integer.parseInt(v);
                             brSpin.setSelection(indexOf(BITRATES, String.valueOf(curBr / 1000))); break;
                         case "hevc": hevcBox.setChecked("1".equals(v)); break;
+                        case "hdr": hdrBox.setChecked("1".equals(v)); break;
                         case "audio": audioBox.setChecked("1".equals(v)); break;
                         default: break;
                     }
@@ -261,11 +263,12 @@ final class SettingsPanel {
         int height = Integer.parseInt(wh[1]);
         int bitrate = Integer.parseInt(mbps) * 1000;
         boolean hevc = hevcBox.isChecked();
+        boolean hdr = hdrBox.isChecked();
         boolean audio = audioBox.isChecked();
 
         status.setText("正在应用…");
         new Thread(() -> {
-            boolean ok = push(width, height, Integer.parseInt(fps), bitrate, hevc, audio);
+            boolean ok = push(width, height, Integer.parseInt(fps), bitrate, hevc, hdr, audio);
             ui.post(() -> {
                 if (ok) {
                     hide();
@@ -277,7 +280,7 @@ final class SettingsPanel {
         }, "settings-apply").start();
     }
 
-    private boolean push(int w, int h, int fps, int bitrate, boolean hevc, boolean audio) {
+    private boolean push(int w, int h, int fps, int bitrate, boolean hevc, boolean hdr, boolean audio) {
         try (Socket s = new Socket()) {
             s.setTcpNoDelay(true);
             s.connect(new InetSocketAddress("127.0.0.1", CFG_PORT), 1500);
@@ -290,6 +293,7 @@ final class SettingsPanel {
                     "set fps=" + fps,
                     "set bitrate=" + bitrate,
                     "set hevc=" + (hevc ? "1" : "0"),
+                    "set hdr=" + (hdr ? "1" : "0"),
                     "set audio=" + (audio ? "1" : "0"),
             };
             for (String l : lines) {

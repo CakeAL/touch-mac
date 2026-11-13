@@ -7,6 +7,9 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
@@ -88,6 +91,37 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             Log.w(TAG, "requestHighRefresh failed: " + e);
         }
+    }
+
+
+    private AudioFocusRequest focusRequest;
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 三星的 AudioHardening 会把“没有音频焦点”的播放当后台播放静音，这里显式申请焦点，
+        // 并声明音量键控制媒体流。
+        AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+        setVolumeControlStream(AudioManager.STREAM_MUSIC);
+        if (am != null && focusRequest == null) {
+            AudioAttributes attrs = new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build();
+            focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setAudioAttributes(attrs)
+                    .setOnAudioFocusChangeListener(focus -> Log.i(TAG, "audio focus " + focus))
+                    .build();
+            int r = am.requestAudioFocus(focusRequest);
+            Log.i(TAG, "requestAudioFocus -> " + r);
+            am.setStreamVolume(AudioManager.STREAM_MUSIC,
+                    am.getStreamVolume(AudioManager.STREAM_MUSIC), 0);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
     }
 
     @Override
@@ -651,6 +685,11 @@ public class MainActivity extends Activity {
             if (!queue.offer(line)) {
                 state = "queue overflow";
             }
+        }
+
+        /** 请求桥立刻发一个关键帧（解码器丢了参考帧时用）。 */
+        void requestIdr() {
+            queue.offer("i\n");
         }
 
         void shutdown() {

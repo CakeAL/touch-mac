@@ -106,6 +106,7 @@ pub async fn run(
                     continue;
                 }
                 let samples = frames as usize * CHANNELS as usize;
+                let peak = pcm[..samples].iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
                 let mut bytes = vec![0u8; samples * 2];
                 for (i, s) in pcm[..samples].iter().enumerate() {
                     let b = s.to_le_bytes();
@@ -118,7 +119,7 @@ pub async fn run(
                 });
                 n += 1;
                 if n % 250 == 1 {
-                    eprintln!("[audio] {n} 包，pcm {}B pts={}us", pkt.pcm.len(), pkt.pts_us);
+                    eprintln!("[audio] {n} 包，pcm {}B pts={}us peak={}", pkt.pcm.len(), pkt.pts_us, peak);
                 }
                 let _ = tx.send(pkt);
             }

@@ -253,8 +253,10 @@ async fn run_session(
     let video_task = tokio::spawn({
         let vtx = vtx.clone();
         let cfg_tx = cfg_tx.clone();
+        let loss_ctl = ctl.clone();
         async move {
-            if let Err(e) = video::run(SocketAddr::new(host_ip, video_port), video_ping, vtx, cfg_tx).await {
+            let on_loss = Arc::new(move || loss_ctl.send(crate::control::Cmd::RequestIdr));
+            if let Err(e) = video::run(SocketAddr::new(host_ip, video_port), video_ping, vtx, cfg_tx, on_loss).await {
                 eprintln!("[video] 退出: {e}");
             }
         }
@@ -341,6 +343,7 @@ async fn main() -> Result<()> {
     let (cfg_tx, cfg_rx) = watch::channel::<Option<Arc<Bytes>>>(None);
     let slot: CtlSlot = Arc::new(std::sync::Mutex::new(None));
     let (clients_tx, mut clients_rx) = watch::channel::<usize>(0);
+    let (idr_tx, mut idr_rx) = watch::channel::<u64>(0);
 
     {
         let vrx = vtx.subscribe();
@@ -368,7 +371,7 @@ async fn main() -> Result<()> {
         let aspect = a.aspect;
         let touch_addr = a.touch;
         tokio::spawn(async move {
-            if let Err(e) = touch::serve(touch_addr, ttx, aspect, clients_tx).await {
+            if let Err(e) = touch::serve(touch_addr, ttx, aspect, clients_tx, idr_tx).await {
                 eprintln!("[touch] 退出: {e}");
             }
         });
@@ -380,6 +383,10 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             _ = clients_rx.changed() => {}
+            _ = idr_rx.changed() => {
+                // 平板端明确要求关键帧（例如解码器丢了参考帧）
+                request_idr(&slot);
+            }
             _ = tokio::signal::ctrl_c() => break,
             _ = tokio::time::sleep(Duration::from_millis(300)) => {}
         }

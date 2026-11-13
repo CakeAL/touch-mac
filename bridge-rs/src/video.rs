@@ -56,6 +56,7 @@ pub async fn run(
     ping_payload: Option<[u8; 16]>,
     tx: broadcast::Sender<VideoMsg>,
     last_config: watch::Sender<Option<Arc<Bytes>>>,
+    on_loss: Arc<dyn Fn() + Send + Sync>,
 ) -> anyhow::Result<()> {
     let sock = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
     // IDR 帧可能是 ~150 个 1408B 的突刺，默认收缓冲会丢包。
@@ -167,14 +168,17 @@ pub async fn run(
                         frames += 1;
                         emit(f, data, frames, &tx, &last_config);
                     }
-                    None => eprintln!(
+                    None => {
+                        on_loss();
+                        eprintln!(
                         "[video] 丢帧 {}（分片缺口 {}..={} 共 {} 片, started={}）",
                         f.index,
                         f.first_block,
                         f.last_block,
                         f.pieces.len(),
                         f.started
-                    ),
+                        );
+                    }
                 }
             }
         } else {

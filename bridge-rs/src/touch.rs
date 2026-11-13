@@ -52,6 +52,7 @@ pub async fn serve(
     tx: mpsc::Sender<TouchEvent>,
     aspect: f32,
     clients: tokio::sync::watch::Sender<usize>,
+    idr: tokio::sync::watch::Sender<u64>,
 ) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     eprintln!("[touch] listening on {}", addr);
@@ -66,9 +67,10 @@ pub async fn serve(
         eprintln!("[touch] client {peer}");
         let tx = tx.clone();
         let cl = clients.clone();
+        let idr = idr.clone();
         cl.send_modify(|n| *n += 1);
         tokio::spawn(async move {
-            if let Err(e) = handle(sock, tx, aspect).await {
+            if let Err(e) = handle(sock, tx, aspect, idr).await {
                 eprintln!("[touch] {peer}: {e}");
             }
             cl.send_modify(|n| *n = n.saturating_sub(1));
@@ -77,7 +79,12 @@ pub async fn serve(
     }
 }
 
-async fn handle(sock: TcpStream, tx: mpsc::Sender<TouchEvent>, aspect: f32) -> Result<()> {
+async fn handle(
+    sock: TcpStream,
+    tx: mpsc::Sender<TouchEvent>,
+    aspect: f32,
+    idr: tokio::sync::watch::Sender<u64>,
+) -> Result<()> {
     let (rd, mut wr) = sock.into_split();
     // 握手：先发目标宽高比，平板据此画活动框。
     let _ = wr
@@ -107,6 +114,9 @@ async fn handle(sock: TcpStream, tx: mpsc::Sender<TouchEvent>, aspect: f32) -> R
                     let _ = wr
                         .write_all(format!("#hb {}\n", crate::now_us()).as_bytes())
                         .await;
+                } else if t == "i" {
+                    // 平板解码端丢了参考帧（队列溢出/清空），请桥立刻要一个 IDR。
+                    idr.send_modify(|n| *n += 1);
                 } else if t == "p" {
                     // 时钟校准：平板发来 p，回 bridge 当前单调微秒。
                     let _ = wr
