@@ -154,6 +154,7 @@ public class MainActivity extends Activity {
         gp.topMargin = dp(14);
         gp.rightMargin = dp(14);
         gear.setOnClickListener(v -> {
+            Log.i(TAG, "gear tapped");
             settings.toggle();
             hideSystemBars();
         });

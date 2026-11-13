@@ -17,7 +17,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { width: 1920, height: 1080, fps: 120, bitrate: 40000, hevc: true, hdr: true, audio: true }
+        Settings { width: 1920, height: 1080, fps: 60, bitrate: 40000, hevc: true, hdr: true, audio: true }
     }
 }
 

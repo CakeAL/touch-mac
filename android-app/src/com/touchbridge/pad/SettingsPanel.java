@@ -74,9 +74,8 @@ final class SettingsPanel {
     private void build() {
         panel = new LinearLayout(act);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(20), dp(16), dp(20), dp(16));
+        panel.setPadding(dp(18), dp(14), dp(18), dp(14));
         panel.setBackground(rounded(0xF0101216, dp(18)));
-        panel.setVisibility(View.GONE);
 
         TextView title = new TextView(act);
         title.setText("设置");
@@ -106,12 +105,12 @@ final class SettingsPanel {
         Button apply = new Button(act);
         apply.setText("应用并重连");
         apply.setOnClickListener(v -> apply());
-        buttons.addView(apply, new LinearLayout.LayoutParams(0, dp(44), 1f));
+        buttons.addView(apply, new LinearLayout.LayoutParams(0, dp(40), 1f));
 
         Button close = new Button(act);
         close.setText("关闭");
         close.setOnClickListener(v -> hide());
-        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, dp(40), 1f);
         clp.leftMargin = dp(8);
         buttons.addView(close, clp);
         panel.addView(buttons);
@@ -119,7 +118,7 @@ final class SettingsPanel {
         ScrollView sv = new ScrollView(act);
         sv.addView(panel);
 
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(420), dp(400));
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(480), dp(420));
         lp.gravity = Gravity.CENTER;
         root.addView(sv, lp);
         this.scroll = sv;
@@ -132,19 +131,20 @@ final class SettingsPanel {
         LinearLayout row = new LinearLayout(act);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(0, dp(6), 0, dp(6));
+        row.setPadding(0, dp(3), 0, dp(3));
 
         TextView l = new TextView(act);
         l.setText(label);
         l.setTextColor(0xFFE6EAF0);
-        l.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        l.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         row.addView(l, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
         Spinner sp = new Spinner(act);
         ArrayAdapter<String> ad = new ArrayAdapter<>(act,
                 android.R.layout.simple_spinner_dropdown_item, items);
         sp.setAdapter(ad);
-        row.addView(sp, new LinearLayout.LayoutParams(dp(160), LinearLayout.LayoutParams.WRAP_CONTENT));
+        sp.setMinimumWidth(dp(200));
+        row.addView(sp, new LinearLayout.LayoutParams(dp(200), dp(40)));
         panel.addView(row);
         return sp;
     }
@@ -170,6 +170,15 @@ final class SettingsPanel {
     }
 
     void show() {
+        Log.i(TAG, "settings panel show, w=" + scroll.getWidth() + " h=" + scroll.getHeight()
+                + " parent=" + scroll.getParent() + " vis=" + scroll.getVisibility());
+        scroll.post(() -> {
+            int[] loc = new int[2];
+            scroll.getLocationOnScreen(loc);
+            Log.i(TAG, "panel at " + loc[0] + "," + loc[1] + " size "
+                    + scroll.getWidth() + "x" + scroll.getHeight()
+                    + " alpha=" + scroll.getAlpha());
+        });
         scroll.setVisibility(View.VISIBLE);
         scroll.bringToFront();
         delayBox.setChecked(prefs.getBoolean("showDelay", true));
