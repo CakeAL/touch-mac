@@ -168,6 +168,7 @@ public class MainActivity extends Activity {
 
         private final Paint dot = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint statusBack = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint hint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint waiting = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -191,6 +192,7 @@ public class MainActivity extends Activity {
             text.setColor(Color.parseColor("#CCFFFFFF"));
             text.setTextSize(34f);
             text.setShadowLayer(4f, 0f, 1f, 0xCC000000);
+            statusBack.setColor(Color.parseColor("#66000000"));
             hint.setColor(Color.parseColor("#66FFFFFF"));
             hint.setTextSize(28f);
             hint.setShadowLayer(4f, 0f, 1f, 0xCC000000);
@@ -277,6 +279,12 @@ public class MainActivity extends Activity {
             }
 
             float tx = area.left + 36f, ty = area.top + 56f;
+            // 状态区压在视频上会看不清，垫一层半透明底。
+            float boxRight = tx + Math.max(text.measureText(link.statusText()),
+                    Math.max(text.measureText(video == null ? "video: off" : video.statusText()),
+                            Math.max(text.measureText(String.format(Locale.US, "touching: %d   frame: %s",
+                                    active.size(), aspectLabel())), hint.measureText("只有框内区域会转发触摸")))) + 24f;
+            canvas.drawRoundRect(tx - 18f, ty - 34f, boxRight, ty + 152f, 18f, 18f, statusBack);
             canvas.drawText(link.statusText(), tx, ty, text);
             canvas.drawText(video == null ? "video: off" : video.statusText(), tx, ty + 44f, text);
             canvas.drawText(String.format(Locale.US, "touching: %d   frame: %s",
